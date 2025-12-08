@@ -4,7 +4,7 @@ on:
   push:
     branches:
       - main
-  workflow_dispatch: # 允许你在 GitHub Actions 页面手动触发
+  workflow_dispatch:
 
 jobs:
   build:
@@ -12,29 +12,23 @@ jobs:
     name: Build Project
 
     steps:
-      # 1. 检出代码
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2. 配置 Node.js 环境
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
-
-      # 3. 安装依赖 (关键修改)
-      # 使用 npm install 代替 npm ci，允许在没有 package-lock.json 的情况下安装
+          # 关键修改：移除了 cache: 'npm'，因为没有 lock 文件无法使用缓存功能
+          
       - name: Install dependencies
+        # 关键修改：使用 npm install，它会自动生成临时 lock 文件并安装
         run: npm install
 
-      # 4. 执行构建
-      # 根据 package.json，这将运行 esbuild 并生成 _worker.js
       - name: Build project
+        # 根据 package.json，这将运行 esbuild 并生成 _worker.js
         run: npm run build
 
-      # 5. 上传构建产物
-      # 这会将 public 目录打包，你可以在 Actions 运行记录的 Artifacts 部分下载
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
