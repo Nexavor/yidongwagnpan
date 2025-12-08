@@ -103,8 +103,17 @@ export async function deleteUser(db, userId) {
 export async function getUserQuota(db, userId) {
     const user = await db.get("SELECT max_storage_bytes FROM users WHERE id = ?", [userId]);
     const usage = await db.get("SELECT SUM(size) as total_size FROM files WHERE user_id = ? AND deleted_at IS NULL", [userId]);
+    
+    // [修复] 这里的逻辑修改了：
+    // 只有当 max_storage_bytes 确实为 null 或 undefined 时才使用默认值
+    // 如果是 0，则保留 0（代表无限）
+    let maxStorage = 1073741824; // 默认 1GB
+    if (user && user.max_storage_bytes !== null && user.max_storage_bytes !== undefined) {
+        maxStorage = user.max_storage_bytes;
+    }
+
     return {
-        max: user ? (user.max_storage_bytes || 1073741824) : 1073741824,
+        max: maxStorage,
         used: usage && usage.total_size ? usage.total_size : 0
     };
 }
@@ -124,11 +133,22 @@ export async function listAllUsersWithQuota(db) {
     const usageSql = `SELECT user_id, SUM(size) as total_size FROM files WHERE user_id IN (${placeholders}) AND deleted_at IS NULL GROUP BY user_id`;
     const usageData = await db.all(usageSql, userIds);
     const usageMap = new Map(usageData.map(row => [row.user_id, row.total_size]));
-    return users.map(user => ({
-        id: user.id, username: user.username, is_admin: user.is_admin,
-        max_storage_bytes: user.max_storage_bytes || 1073741824, 
-        used_storage_bytes: usageMap.get(user.id) || 0
-    }));
+    
+    return users.map(user => {
+        // [修复] 同样在这里修复显示逻辑，防止管理员列表中显示错误
+        let maxBytes = 1073741824;
+        if (user.max_storage_bytes !== null && user.max_storage_bytes !== undefined) {
+            maxBytes = user.max_storage_bytes;
+        }
+
+        return {
+            id: user.id, 
+            username: user.username, 
+            is_admin: user.is_admin,
+            max_storage_bytes: maxBytes, 
+            used_storage_bytes: usageMap.get(user.id) || 0
+        };
+    });
 }
 
 export async function setMaxStorageForUser(db, userId, maxBytes) {
