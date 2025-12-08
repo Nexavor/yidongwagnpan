@@ -1,7 +1,8 @@
 name: Build Only
 
 on:
-　workflow_dispatch:
+  # 仅保留手动触发
+  workflow_dispatch:
 
 jobs:
   build:
