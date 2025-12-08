@@ -289,6 +289,14 @@
                 document.getElementById('webdavUser').value = dav.username || '';
             } catch(e) {}
 
+            // [新增] 加载 Telegram 配置
+            try {
+                const res = await axios.get('/api/admin/telegram');
+                const tg = res.data || {};
+                document.getElementById('tgBotToken').value = tg.botToken || '';
+                document.getElementById('tgChatId').value = tg.chatId || '';
+            } catch(e) {}
+
             // 加载用户列表
             loadUsers();
 
@@ -340,7 +348,18 @@
     }
 
     async function saveTelegram() {
-        alert("Telegram 配置保存需后端支持，请确认 worker.js 已添加相关路由");
+        const config = {
+            botToken: document.getElementById('tgBotToken').value.trim(),
+            chatId: document.getElementById('tgChatId').value.trim()
+        };
+        if(!config.botToken || !config.chatId) return showMsg('Bot Token 和 Chat ID 必填', 'error');
+        
+        try {
+            await axios.post('/api/admin/telegram', config);
+            showMsg('Telegram 配置已保存');
+        } catch (e) { 
+            showMsg('保存失败: ' + (e.response?.data?.message || e.message), 'error'); 
+        }
     }
 
     async function loadUsers() {
