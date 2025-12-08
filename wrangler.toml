@@ -1,0 +1,19 @@
+name = "cfilemanger"
+compatibility_date = "2023-12-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Pages 配置
+pages_build_output_dir = "./public"
+
+# KV 和 D1 绑定 (ID 请保持你之前 setup 生成的)
+[[kv_namespaces]]
+binding = "CONFIG_KV"
+id = "baff4384e03342e599638f826b563940" # 保持不变
+
+[[d1_databases]]
+binding = "DB"
+database_name = "netfile-db"
+database_id = "1f21da5d-46b1-4232-bf44-4689b7417467" # 保持不变
+
+[vars]
+SESSION_SECRET = "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f"

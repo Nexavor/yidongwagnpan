@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>文本编辑器</title>
+    <link rel="stylesheet" href="/vendor/fontawesome/css/all.min.css">
+    <style>
+        body { margin: 0; display: flex; flex-direction: column; height: 100vh; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; background-color: #f8f9fa; }
+        
+        header { 
+            background: #343a40; 
+            color: white; 
+            padding: 0 20px; 
+            height: 50px; 
+            display: flex; 
+            justify-content: space-between; 
+            align-items: center; 
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        h1 { margin: 0; font-size: 16px; font-weight: 500; display: flex; align-items: center; }
+        h1 i { margin-right: 10px; color: #adb5bd; }
+        
+        .actions { display: flex; gap: 10px; }
+        .actions button { 
+            padding: 6px 12px; 
+            cursor: pointer; 
+            border: none; 
+            border-radius: 4px; 
+            font-size: 13px; 
+            font-weight: 500; 
+            transition: background-color 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+        
+        .save-btn { background: #28a745; color: white; }
+        .save-btn:hover { background: #218838; }
+        .save-btn:disabled { background: #6c757d; cursor: not-allowed; }
+        
+        .close-btn { background: #dc3545; color: white; }
+        .close-btn:hover { background: #c82333; }
+        
+        #editor-container { flex: 1; position: relative; }
+        
+        textarea { 
+            width: 100%; 
+            height: 100%; 
+            padding: 20px; 
+            box-sizing: border-box; 
+            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', 'source-code-pro', monospace; 
+            font-size: 14px; 
+            line-height: 1.6;
+            border: none; 
+            resize: none; 
+            outline: none; 
+            background: #ffffff; 
+            color: #212529;
+        }
+
+        /* 简单的加载遮罩 */
+        #loading-overlay {
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(255,255,255,0.8);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 10;
+        }
+        
+        .status-msg { font-size: 12px; color: #ced4da; margin-right: 15px; }
+    </style>
+</head>
+<body>
+    <header>
+        <h1><i class="fas fa-file-alt"></i> <span id="fileName">加载中...</span></h1>
+        <div style="display:flex; align-items:center;">
+            <span id="statusMsg" class="status-msg"></span>
+            <div class="actions">
+                <button class="save-btn" id="saveBtn" disabled><i class="fas fa-save"></i> 保存 (Ctrl+S)</button>
+                <button class="close-btn" id="closeBtn" onclick="window.close()"><i class="fas fa-times"></i> 关闭</button>
+            </div>
+        </div>
+    </header>
+    
+    <div id="editor-container">
+        <div id="loading-overlay">正在加载文件内容...</div>
+        <textarea id="editor" spellcheck="false"></textarea>
+    </div>
+
+    <script src="/vendor/axios/axios.min.js"></script>
+    <script>
+        const urlParams = new URLSearchParams(window.location.search);
+        const fileId = urlParams.get('id'); // message_id
+        const fileName = urlParams.get('name') || '未命名文件';
+        
+        const fileNameEl = document.getElementById('fileName');
+        const editorEl = document.getElementById('editor');
+        const saveBtn = document.getElementById('saveBtn');
+        const loadingOverlay = document.getElementById('loading-overlay');
+        const statusMsg = document.getElementById('statusMsg');
+
+        fileNameEl.textContent = fileName;
+        document.title = `编辑 - ${fileName}`;
+
+        // 1. 加载文件内容
+        if (fileId) {
+            axios.get(`/download/proxy/${fileId}`, { 
+                responseType: 'text',
+                // 防止缓存
+                headers: { 'Cache-Control': 'no-cache' } 
+            })
+            .then(res => {
+                // 如果返回的是 JSON 错误对象 (比如 404/500 但 axios 视为成功 text)
+                if (typeof res.data === 'object') {
+                    throw new Error('获取内容失败，可能是非文本文件');
+                }
+                editorEl.value = res.data;
+                loadingOverlay.style.display = 'none';
+                saveBtn.disabled = false;
+                showStatus('文件已加载');
+            })
+            .catch(err => {
+                loadingOverlay.innerHTML = `<span style="color:red">无法加载文件: ${err.message}<br>请确认这是否是一个文本文件。</span>`;
+                console.error(err);
+            });
+        } else {
+            loadingOverlay.innerHTML = '<span style="color:red">无效的文件 ID</span>';
+        }
+
+        // 2. 保存文件
+        async function saveFile() {
+            if (saveBtn.disabled) return;
+            
+            saveBtn.disabled = true;
+            saveBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 保存中...';
+            showStatus('正在保存...');
+
+            const content = editorEl.value;
+
+            try {
+                const res = await axios.post('/api/file/save', {
+                    id: fileId,
+                    content: content
+                });
+
+                if (res.data.success) {
+                    showStatus('保存成功！' + new Date().toLocaleTimeString());
+                    // 短暂提示成功
+                    const originalBtnContent = '<i class="fas fa-check"></i> 已保存';
+                    saveBtn.innerHTML = originalBtnContent;
+                    setTimeout(() => {
+                        saveBtn.innerHTML = '<i class="fas fa-save"></i> 保存 (Ctrl+S)';
+                        saveBtn.disabled = false;
+                    }, 1500);
+                } else {
+                    throw new Error(res.data.message);
+                }
+            } catch (err) {
+                console.error(err);
+                alert('保存失败: ' + (err.response?.data?.message || err.message));
+                saveBtn.innerHTML = '<i class="fas fa-save"></i> 保存 (Ctrl+S)';
+                saveBtn.disabled = false;
+                showStatus('保存失败');
+            }
+        }
+
+        saveBtn.addEventListener('click', saveFile);
+
+        // 3. 快捷键支持 (Ctrl+S)
+        document.addEventListener('keydown', (e) => {
+            if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+                e.preventDefault();
+                saveFile();
+            }
+        });
+
+        function showStatus(msg) {
+            statusMsg.textContent = msg;
+        }
+    </script>
+</body>
+</html>

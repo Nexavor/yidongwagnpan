@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>网络文件管理器</title>
+    <link rel="stylesheet" href="/manager.css">
+    <link rel="stylesheet" href="/vendor/fontawesome/css/all.min.css">
+    <script src="/vendor/axios/axios.min.js"></script>
+    <script src="/manager.js"></script>
+</head>
+<body>
+    <div class="navbar">
+        <div class="brand" onclick="window.location.href='/'" style="cursor: pointer;" title="回到首页">
+            <i class="fas fa-cloud"></i> 主页
+        </div>
+        <div class="search-box">
+            <form id="searchForm">
+                <input type="text" id="searchInput" placeholder="搜索文件...">
+                <button type="submit"><i class="fas fa-search"></i></button>
+            </form>
+        </div>
+        <div class="user-controls">
+            <button id="shareMgrBtn" class="icon-btn" title="分享管理" onclick="window.location.href='/shares'"><i class="fas fa-share-alt-square"></i></button>
+            
+            <button id="changePasswordBtn" class="icon-btn" title="修改密码"><i class="fas fa-key"></i></button>
+
+            <button id="trashBtn" class="icon-btn" title="回收站"><i class="fas fa-trash"></i></button>
+            <button id="logoutBtn" class="icon-btn" title="退出登录"><i class="fas fa-sign-out-alt"></i></button>
+        </div>
+    </div>
+
+    <div id="trashBanner" class="trash-banner" style="display:none;">
+        <div class="banner-text"><i class="fas fa-exclamation-triangle"></i> 当前处于回收站模式</div>
+        <div class="trash-actions">
+            <button id="restoreBtn" class="btn success-btn"><i class="fas fa-trash-restore"></i> 还原选中</button>
+            <button id="deleteForeverBtn" class="btn danger-btn"><i class="fas fa-times"></i> 永久删除</button>
+            <button id="emptyTrashBtn" class="btn danger-btn"><i class="fas fa-dumpster-fire"></i> 清空回收站</button>
+        </div>
+    </div>
+
+    <div class="toolbar">
+        <div class="left-tools normal-mode-btn">
+            <button id="showUploadModalBtn" class="btn primary-btn"><i class="fas fa-cloud-upload-alt"></i> 上传文件</button>
+            <button onclick="location.reload()" class="btn"><i class="fas fa-sync-alt"></i> 刷新</button>
+        </div>
+        <div class="right-tools">
+            <button id="multiSelectToggleBtn" class="icon-btn" title="多选模式"><i class="fas fa-check-square"></i></button>
+            <button id="selectAllBtn" class="icon-btn" title="全选"><i class="fas fa-th"></i></button>
+            <button id="view-switch-btn" class="icon-btn" title="切换视图"><i class="fas fa-list"></i></button>
+        </div>
+    </div>
+
+    <div class="breadcrumb-container">
+        <ul id="breadcrumb"></ul>
+        <div id="selectionInfo" class="selection-info" style="display:none;"></div>
+    </div>
+
+    <div class="main-content">
+        <div id="itemGrid" class="grid-view"></div>
+        <div id="itemListView" class="list-view" style="display:none;">
+            <table>
+                <thead>
+                    <tr>
+                        <th style="width: 50px;"></th>
+                        <th>名称</th>
+                        <th style="width: 100px;">大小</th>
+                        <th style="width: 180px;">日期</th>
+                    </tr>
+                </thead>
+                <tbody id="itemListBody"></tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="status-bar">
+        <div class="quota-container">
+            <span>存储: <span id="quotaUsed">0 B</span> / <span id="quotaMax">0 B</span></span>
+            <div class="progress-track">
+                <div id="quotaBar" class="progress-fill"></div>
+            </div>
+        </div>
+
+        <div id="taskStatusBar" class="task-status-bar">
+            <div class="task-info">
+                <i id="taskIcon" class="fas fa-spinner task-icon"></i>
+                <span id="taskText">就绪</span>
+            </div>
+            <div class="mini-progress-track">
+                <div id="taskProgress" class="mini-progress-fill"></div>
+            </div>
+        </div>
+    </div>
+
+    <div id="contextMenu" class="context-menu" style="display:none;">
+        <div class="menu-item normal-mode-btn global-action" id="ctxCreateFolderBtn"><i class="fas fa-folder-plus"></i> 新建文件夹</div>
+        <div class="menu-item normal-mode-btn global-action" id="ctxCreateFileBtn"><i class="fas fa-file-alt"></i> 新建文本文件</div>
+        <div class="menu-separator normal-mode-btn global-action"></div>
+
+        <div class="menu-item normal-mode-btn item-action" id="openBtn"><i class="fas fa-folder-open"></i> 打开</div>
+        <div class="menu-item normal-mode-btn item-action" id="previewBtn"><i class="fas fa-eye"></i> 预览</div>
+        <div class="menu-item normal-mode-btn item-action" id="editBtn"><i class="fas fa-edit"></i> 编辑</div>
+        <div class="menu-item normal-mode-btn item-action" id="downloadBtn"><i class="fas fa-download"></i> 下载</div>
+        <div class="menu-separator normal-mode-btn item-action"></div>
+        <div class="menu-item normal-mode-btn item-action" id="shareBtn"><i class="fas fa-share-alt"></i> 分享</div>
+        <div class="menu-item normal-mode-btn item-action" id="moveBtn"><i class="fas fa-arrows-alt"></i> 移动</div>
+        <div class="menu-item normal-mode-btn item-action" id="renameBtn"><i class="fas fa-signature"></i> 重命名</div>
+        <div class="menu-item normal-mode-btn item-action" id="lockBtn"><i class="fas fa-lock"></i> 加密/解锁</div>
+        <div class="menu-separator item-action"></div>
+        <div class="menu-item text-danger item-action" id="deleteBtn"><i class="fas fa-trash-alt"></i> 删除</div>
+    </div>
+
+    <div id="uploadModal" class="modal">
+        <div class="modal-content">
+            <span class="close-button" id="closeUploadModalBtn">&times;</span>
+            <h3>上传文件</h3>
+            <form id="uploadForm">
+                <div class="form-group">
+                    <label>选择目标文件夹:</label>
+                    <select id="folderSelect" class="form-control"></select>
+                </div>
+                <div class="form-group">
+                    <label>文件:</label>
+                    <input type="file" id="fileInput" class="form-control" multiple>
+                </div>
+                <div class="form-group">
+                    <label>文件夹:</label>
+                    <input type="file" id="folderInput" class="form-control" webkitdirectory directory multiple>
+                </div>
+                <div id="progressArea" style="display:none;">
+                    <div class="progress-track">
+                        <div id="progressBar" class="progress-fill" style="width:0%">0%</div>
+                    </div>
+                </div>
+                <button type="submit" class="btn primary-btn full-width">开始上传</button>
+            </form>
+        </div>
+    </div>
+
+    <div id="moveModal" class="modal">
+        <div class="modal-content">
+            <h3>移动到...</h3>
+            <div id="folderTree" class="folder-tree-container">加载中...</div>
+            <div class="modal-actions">
+                <button id="cancelMoveBtn" class="btn">取消</button>
+                <button id="confirmMoveBtn" class="btn primary-btn" disabled>确定移动</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="shareModal" class="modal">
+        <div class="modal-content">
+            <span class="close-button" id="closeShareModalBtn">&times;</span>
+            <h3>创建分享链接</h3>
+            <div id="shareOptions">
+                <div class="form-group">
+                    <label>有效期:</label>
+                    <select id="expiresInSelect" class="form-control">
+                        <option value="1h">1 小时</option>
+                        <option value="24h" selected>24 小时</option>
+                        <option value="7d">7 天</option>
+                        <option value="0">永久有效</option>
+                        <option value="custom">自定义...</option>
+                    </select>
+                    <input type="datetime-local" id="customExpiresInput" class="form-control" style="display:none; margin-top:5px;">
+                </div>
+                <div class="form-group">
+                    <label>提取密码 (选填):</label>
+                    <input type="text" id="sharePasswordInput" class="form-control" placeholder="留空则公开">
+                </div>
+                <div class="modal-actions">
+                    <button id="cancelShareBtn" class="btn">取消</button>
+                    <button id="confirmShareBtn" class="btn primary-btn">生成链接</button>
+                </div>
+            </div>
+            <div id="shareResult" style="display:none; text-align:center;">
+                <p>分享链接已生成:</p>
+                <div id="shareLinkContainer" class="code-box"></div>
+                <button id="copyLinkBtn" class="btn primary-btn" style="margin-top:10px;">复制链接</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="previewModal" class="modal">
+        <div class="modal-content preview-content">
+            <span class="close-button">&times;</span>
+            <div id="modalContent"></div>
+        </div>
+    </div>
+    
+    <div id="conflictModal" class="modal" style="z-index: 2001;">
+        <div class="modal-content" style="width: 400px;">
+            <h3><i class="fas fa-exclamation-triangle" style="color: #ffc107;"></i> 文件冲突</h3>
+            <p id="conflictMessage" style="margin: 15px 0; color: #555;">目标文件夹中已存在同名文件。</p>
+            
+            <div class="form-group">
+                <label class="checkbox-label" style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size: 0.9rem;">
+                    <input type="checkbox" id="applyToAllCheckbox"> 
+                    <span>为之后的所有冲突执行此操作</span>
+                </label>
+            </div>
+
+            <div class="modal-actions" style="flex-direction: column; gap: 10px;">
+                <button id="conflictRenameBtn" class="btn primary-btn full-width"><i class="fas fa-copy"></i> 保留两者 (自动重命名)</button>
+                <button id="conflictOverwriteBtn" class="btn danger-btn full-width"><i class="fas fa-file-import"></i> 覆盖 (替换原文件)</button>
+                <button id="conflictSkipBtn" class="btn full-width" style="border: 1px solid #ccc;"><i class="fas fa-forward"></i> 跳过</button>
+                <button id="conflictCancelBtn" class="btn full-width" style="color: #666;">取消操作</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="changePasswordModal" class="modal">
+        <div class="modal-content" style="max-width: 400px;">
+            <span class="close-button" id="closeChangePasswordBtn">&times;</span>
+            <h3>修改密码</h3>
+            <form id="changePasswordForm">
+                <div class="form-group">
+                    <label>旧密码:</label>
+                    <input type="password" id="oldPasswordInput" class="form-control" placeholder="请输入当前密码">
+                </div>
+                <div class="form-group">
+                    <label>新密码:</label>
+                    <input type="password" id="newPasswordInput" class="form-control" placeholder="请输入新密码">
+                </div>
+                <button type="button" id="submitChangePasswordBtn" class="btn primary-btn full-width">确认修改</button>
+            </form>
+        </div>
+    </div>
+
+    <div id="unlockModal" class="modal" style="z-index: 2002;">
+        <div class="modal-content" style="max-width: 400px; text-align: center;">
+            <div style="margin-bottom: 20px; font-size: 50px; color: #ffc107;">
+                <i class="fas fa-lock"></i>
+            </div>
+            <h3>此文件夹已加密</h3>
+            <p style="color: #666; margin-bottom: 20px;">请输入密码以访问内容。</p>
+            <form id="unlockForm">
+                <div class="form-group">
+                    <input type="password" id="unlockPasswordInput" class="form-control" placeholder="请输入密码" required autofocus>
+                </div>
+                <div class="modal-actions" style="justify-content: center;">
+                    <button type="button" class="btn" onclick="document.getElementById('unlockModal').style.display='none'">取消</button>
+                    <button type="submit" class="btn primary-btn">解锁</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <div id="dropZoneOverlay" class="drop-overlay">
+        <div class="drop-message">
+            <i class="fas fa-cloud-upload-alt"></i>
+            <h3>释放以上传文件</h3>
+        </div>
+    </div>
+
+</body>
+</html>

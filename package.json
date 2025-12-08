@@ -1,0 +1,27 @@
+{
+  "name": "network-file-manager",
+  "version": "1.0.0",
+  "description": "A secure network file manager running on Cloudflare Workers/Pages",
+  "main": "src/worker.js",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "setup": "node setup.js",
+    "build": "esbuild src/worker.js --bundle --outfile=public/_worker.js --format=esm --platform=node --target=esnext --external:__STATIC_CONTENT_MANIFEST",
+    "deploy": "npm run build && wrangler pages deploy public",
+    "dev": "npm run build && wrangler pages dev public",
+    "start": "npm run dev"
+  },
+  "dependencies": {
+    "aws4fetch": "^1.0.20",
+    "bcryptjs": "^2.4.3",
+    "hono": "^3.12.12"
+  },
+  "devDependencies": {
+    "esbuild": "^0.19.0",
+    "wrangler": "^3.114.15"
+  }
+}

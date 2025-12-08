@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>系统管理 - Network FileManager</title>
+    <link rel="stylesheet" href="/manager.css">
+    <link rel="stylesheet" href="/vendor/fontawesome/css/all.min.css">
+    <style>
+        body { background-color: #f4f6f8; padding: 20px; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+        .admin-container { max-width: 900px; margin: 0 auto; background: #fff; padding: 30px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); }
+        h2 { border-bottom: 2px solid #007bff; padding-bottom: 10px; margin-bottom: 20px; color: #333; }
+        .section { background: #fff; border: 1px solid #e0e0e0; border-radius: 6px; padding: 20px; margin-bottom: 25px; }
+        .section h3 { margin-top: 0; margin-bottom: 15px; color: #007bff; font-size: 1.1rem; border-bottom: 1px dashed #eee; padding-bottom: 10px; }
+        .form-group { margin-bottom: 15px; }
+        .form-group label { display: block; margin-bottom: 5px; font-weight: 500; font-size: 0.9rem; color: #555; }
+        .form-control { width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 0.95rem; }
+        .form-row { display: flex; gap: 15px; margin-bottom: 15px; }
+        .form-row .form-group { flex: 1; margin-bottom: 0; }
+        
+        .btn { padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer; font-size: 0.9rem; transition: opacity 0.2s; color: #fff; }
+        .btn:hover { opacity: 0.9; }
+        .primary-btn { background-color: #007bff; }
+        .success-btn { background-color: #28a745; }
+        .danger-btn { background-color: #dc3545; }
+        .warning-btn { background-color: #ffc107; color: #333; }
+
+        .user-list-item { display: flex; justify-content: space-between; align-items: center; padding: 10px; border-bottom: 1px solid #eee; }
+        .user-list-item:last-child { border-bottom: none; }
+        .user-info { display: flex; align-items: center; gap: 10px; }
+        .badge { padding: 2px 6px; border-radius: 4px; font-size: 0.75rem; background: #eee; color: #555; }
+        .badge-admin { background: #007bff; color: #fff; }
+
+        .status-msg { position: fixed; top: 20px; right: 20px; padding: 15px 25px; border-radius: 4px; color: #fff; display: none; z-index: 1000; box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
+        .msg-success { background-color: #28a745; }
+        .msg-error { background-color: #dc3545; }
+
+        .nav-links { margin-bottom: 20px; display: flex; justify-content: space-between; }
+        .nav-links a { color: #007bff; text-decoration: none; display: flex; align-items: center; gap: 5px; }
+        .nav-links a:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+
+<div class="admin-container">
+    <div class="nav-links">
+        <a href="/"><i class="fas fa-arrow-left"></i> 返回网盘首页</a>
+        <a href="#" onclick="location.reload()"><i class="fas fa-sync"></i> 刷新配置</a>
+    </div>
+
+    <h2><i class="fas fa-cogs"></i> 系统管理后台</h2>
+
+    <div class="section">
+        <h3><i class="fas fa-hdd"></i> 存储模式设置</h3>
+        <div class="form-group">
+            <label>选择当前使用的存储后端: <span id="currentModeLabel" style="color: #28a745; font-weight: bold; margin-left: 10px;"></span></label>
+            <select id="storageModeSelect" class="form-control">
+                <option value="" disabled selected>-- 请选择存储后端 --</option>
+                <option value="s3">S3 兼容存储 (AWS, MinIO, OSS 等)</option>
+                <option value="webdav">WebDAV (Alist, Nextcloud 等)</option>
+                <option value="telegram">Telegram Bot (无限容量)</option>
+            </select>
+        </div>
+        <button class="btn primary-btn" onclick="saveStorageMode()"><i class="fas fa-save"></i> 保存并应用模式</button>
+    </div>
+
+    <div class="section" id="s3Section" style="display:none;">
+        <h3><i class="fas fa-cloud"></i> S3 兼容存储配置</h3>
+        <div class="form-row">
+            <div class="form-group">
+                <label>Endpoint (API 地址):</label>
+                <input type="text" id="s3Endpoint" class="form-control" placeholder="https://s3.us-east-1.amazonaws.com">
+            </div>
+            <div class="form-group">
+                <label>Region (区域):</label>
+                <input type="text" id="s3Region" class="form-control" placeholder="auto">
+            </div>
+        </div>
+        <div class="form-group">
+            <label>Bucket Name (存储桶名称):</label>
+            <input type="text" id="s3Bucket" class="form-control" placeholder="my-bucket">
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label>Access Key ID:</label>
+                <input type="text" id="s3AccessKey" class="form-control">
+            </div>
+            <div class="form-group">
+                <label>Secret Access Key:</label>
+                <input type="password" id="s3SecretKey" class="form-control">
+            </div>
+        </div>
+        <div class="form-group">
+            <label>Public URL (自定义域名/CDN，选填):</label>
+            <input type="text" id="s3PublicUrl" class="form-control" placeholder="https://cdn.example.com">
+        </div>
+        <button class="btn primary-btn" onclick="saveS3()"><i class="fas fa-save"></i> 保存 S3 配置</button>
+    </div>
+
+    <div class="section" id="webdavSection" style="display:none;">
+        <h3><i class="fas fa-network-wired"></i> WebDAV 配置</h3>
+        <div class="form-group">
+            <label>Endpoint URL (WebDAV 地址):</label>
+            <input type="text" id="webdavEndpoint" class="form-control" placeholder="https://dav.example.com/webdav">
+            <small style="color:#666;">注意：地址不要以斜杠结尾。</small>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label>用户名:</label>
+                <input type="text" id="webdavUser" class="form-control">
+            </div>
+            <div class="form-group">
+                <label>密码:</label>
+                <input type="password" id="webdavPass" class="form-control">
+            </div>
+        </div>
+        <button class="btn primary-btn" onclick="saveWebDAV()"><i class="fas fa-save"></i> 保存 WebDAV 配置</button>
+    </div>
+
+    <div class="section" id="telegramSection" style="display:none;">
+        <h3><i class="fab fa-telegram"></i> Telegram Bot 配置</h3>
+        <div class="form-group">
+            <label>Bot Token:</label>
+            <input type="text" id="tgBotToken" class="form-control" placeholder="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11">
+        </div>
+        <div class="form-group">
+            <label>Chat ID (频道或个人ID):</label>
+            <input type="text" id="tgChatId" class="form-control" placeholder="-1001234567890">
+        </div>
+        <button class="btn primary-btn" onclick="saveTelegram()"><i class="fas fa-save"></i> 保存 Telegram 配置</button>
+    </div>
+
+    <div class="section">
+        <h3><i class="fas fa-users"></i> 用户管理</h3>
+        <div class="form-row" style="align-items: flex-end;">
+            <div class="form-group">
+                <label>新用户名:</label>
+                <input type="text" id="newUsername" class="form-control">
+            </div>
+            <div class="form-group">
+                <label>密码:</label>
+                <input type="text" id="newPassword" class="form-control">
+            </div>
+            <div class="form-group" style="flex: 0 0 auto;">
+                <button class="btn success-btn" onclick="addUser()"><i class="fas fa-plus"></i> 添加</button>
+            </div>
+        </div>
+        <div id="userList" style="border: 1px solid #eee; border-radius: 4px; max-height: 300px; overflow-y: auto;">
+            <div style="padding:10px; text-align:center; color:#999;">正在加载用户...</div>
+        </div>
+    </div>
+
+    <div class="section">
+        <h3><i class="fas fa-tools"></i> 维护工具</h3>
+        
+        <div class="form-group">
+            <label>设置用户存储配额 (GB):</label>
+            <div class="form-row">
+                <div class="form-group">
+                    <select id="quotaUserSelect" class="form-control">
+                        <option value="">-- 选择用户 --</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <input type="number" id="quotaValue" class="form-control" placeholder="例如 1 或 0.5">
+                </div>
+                <div class="form-group" style="flex: 0 0 auto;">
+                    <button class="btn warning-btn" onclick="setQuota()">设置配额</button>
+                </div>
+            </div>
+            <small style="color:#666;">设为 0 表示无限制。</small>
+        </div>
+
+        <hr style="margin: 20px 0; border: 0; border-top: 1px dashed #eee;">
+
+        <div class="form-group">
+            <label>导入外部文件:</label>
+            <p style="font-size:0.85rem; color:#666; margin-top:0;">扫描当前配置的存储后端中的文件，并将其导入到数据库（根目录）。仅适用于 S3/webdav。</p>
+            <div class="form-row">
+                <div class="form-group">
+                    <select id="scanUserSelect" class="form-control"></select>
+                </div>
+                <div class="form-group" style="flex: 0 0 auto;">
+                    <button class="btn primary-btn" onclick="scanStorage()"><i class="fas fa-search"></i> 开始扫描导入</button>
+                </div>
+            </div>
+        </div>
+        <div id="scanLog" style="background:#333; color:#0f0; padding:10px; font-family:monospace; height:150px; overflow-y:auto; display:none; border-radius:4px; font-size:0.8rem;"></div>
+    </div>
+
+</div>
+
+<div id="statusMsg" class="status-msg"></div>
+
+<script src="/vendor/axios/axios.min.js"></script>
+<script>
+    document.addEventListener('DOMContentLoaded', () => {
+        loadSettings();
+    });
+
+    const storageSelect = document.getElementById('storageModeSelect');
+    const webdavSection = document.getElementById('webdavSection');
+    const s3Section = document.getElementById('s3Section');
+    const telegramSection = document.getElementById('telegramSection');
+    const currentModeLabel = document.getElementById('currentModeLabel');
+
+    // 存储当前用户列表数据，用于切换选择时自动填充配额
+    let cachedUsers = [];
+
+    storageSelect.addEventListener('change', updateUI);
+
+    // 监听用户选择变化，自动填入当前配额
+    document.getElementById('quotaUserSelect').addEventListener('change', function() {
+        const userId = this.value;
+        const user = cachedUsers.find(u => u.id == userId);
+        if (user) {
+            const gb = user.max_storage_bytes === 0 ? 0 : (user.max_storage_bytes / (1024 * 1024 * 1024));
+            // 保留最多2位小数，如果是整数则不显示小数
+            document.getElementById('quotaValue').value = Math.round(gb * 100) / 100;
+        }
+    });
+
+    function updateUI() {
+        const mode = storageSelect.value;
+        webdavSection.style.display = mode === 'webdav' ? 'block' : 'none';
+        s3Section.style.display = mode === 's3' ? 'block' : 'none';
+        telegramSection.style.display = mode === 'telegram' ? 'block' : 'none';
+    }
+
+    function showMsg(text, type = 'success') {
+        const el = document.getElementById('statusMsg');
+        el.textContent = text;
+        el.className = `status-msg ${type === 'success' ? 'msg-success' : 'msg-error'}`;
+        el.style.display = 'block';
+        setTimeout(() => el.style.display = 'none', 3000);
+    }
+
+    function getModeName(mode) {
+        const map = {
+            's3': 'S3 兼容存储',
+            'webdav': 'WebDAV',
+            'telegram': 'Telegram Bot'
+        };
+        return map[mode] || '未知';
+    }
+
+    async function loadSettings() {
+        try {
+            // 加载当前存储模式
+            try {
+                const res = await axios.get('/api/admin/storage-mode');
+                const mode = res.data.mode;
+                if (mode) {
+                    storageSelect.value = mode;
+                    currentModeLabel.textContent = `(当前: ${getModeName(mode)})`;
+                    updateUI();
+                }
+            } catch(e) {}
+
+            // 加载 S3 配置
+            try {
+                const res = await axios.get('/api/admin/s3');
+                const s3 = res.data.s3 || {};
+                document.getElementById('s3Endpoint').value = s3.endpoint || '';
+                document.getElementById('s3Region').value = s3.region || '';
+                document.getElementById('s3Bucket').value = s3.bucketName || '';
+                document.getElementById('s3AccessKey').value = s3.accessKeyId || '';
+                document.getElementById('s3PublicUrl').value = s3.publicUrl || '';
+            } catch(e) {}
+
+            // 加载 WebDAV 配置
+            try {
+                const res = await axios.get('/api/admin/webdav');
+                let dav = res.data;
+                if(Array.isArray(dav)) dav = dav[0] || {};
+                document.getElementById('webdavEndpoint').value = dav.endpoint || '';
+                document.getElementById('webdavUser').value = dav.username || '';
+            } catch(e) {}
+
+            // 加载用户列表
+            loadUsers();
+
+        } catch (e) {
+            console.error(e);
+            showMsg('加载部分配置失败，请检查控制台', 'error');
+        }
+    }
+
+    async function saveStorageMode() {
+        const mode = storageSelect.value;
+        if (!mode) return showMsg('请选择一个存储模式', 'error');
+        try {
+            await axios.post('/api/admin/storage-mode', { mode });
+            showMsg('存储模式已切换为: ' + mode);
+            
+            // 更新显示的标签
+            currentModeLabel.textContent = `(当前: ${getModeName(mode)})`;
+            updateUI();
+        } catch (e) { showMsg('保存失败', 'error'); }
+    }
+
+    async function saveWebDAV() {
+        const config = {
+            endpoint: document.getElementById('webdavEndpoint').value.trim(),
+            username: document.getElementById('webdavUser').value.trim(),
+            password: document.getElementById('webdavPass').value.trim()
+        };
+        if(!config.endpoint) return showMsg('Endpoint 必填', 'error');
+        try {
+            await axios.post('/api/admin/webdav', config);
+            showMsg('WebDAV 配置已保存');
+        } catch (e) { showMsg('保存失败', 'error'); }
+    }
+
+    async function saveS3() {
+        const config = {
+            endpoint: document.getElementById('s3Endpoint').value.trim(),
+            region: document.getElementById('s3Region').value.trim(),
+            bucketName: document.getElementById('s3Bucket').value.trim(),
+            accessKeyId: document.getElementById('s3AccessKey').value.trim(),
+            secretAccessKey: document.getElementById('s3SecretKey').value.trim(),
+            publicUrl: document.getElementById('s3PublicUrl').value.trim()
+        };
+        try {
+            await axios.post('/api/admin/s3', config);
+            showMsg('S3 配置已保存');
+        } catch (e) { showMsg('保存失败', 'error'); }
+    }
+
+    async function saveTelegram() {
+        alert("Telegram 配置保存需后端支持，请确认 worker.js 已添加相关路由");
+    }
+
+    async function loadUsers() {
+        const listEl = document.getElementById('userList');
+        const quotaSel = document.getElementById('quotaUserSelect');
+        const scanSel = document.getElementById('scanUserSelect');
+        
+        try {
+            const res = await axios.get('/api/admin/users-with-quota');
+            const users = res.data.users || [];
+            cachedUsers = users; // 缓存用户列表供配额换算使用
+            
+            listEl.innerHTML = '';
+            quotaSel.innerHTML = '<option value="">-- 选择用户 --</option>';
+            scanSel.innerHTML = '';
+
+            users.forEach(u => {
+                // 渲染列表
+                const div = document.createElement('div');
+                div.className = 'user-list-item';
+                div.innerHTML = `
+                    <div class="user-info">
+                        <strong>${u.username}</strong>
+                        ${u.is_admin ? '<span class="badge badge-admin">管理员</span>' : '<span class="badge">用户</span>'}
+                        <span style="font-size:0.8rem; color:#999;">已用: ${formatSize(u.used_storage_bytes)} / 配额: ${u.max_storage_bytes == 0 ? '无限' : formatSize(u.max_storage_bytes)}</span>
+                    </div>
+                    <div>
+                        <button class="btn warning-btn" style="padding:2px 8px; font-size:0.8rem; margin-right:5px;" onclick="changePassword(${u.id}, '${u.username}')"><i class="fas fa-key"></i> 修改密码</button>
+                        ${!u.is_admin ? `<button class="btn danger-btn" style="padding:2px 8px; font-size:0.8rem;" onclick="delUser(${u.id})"><i class="fas fa-trash"></i> 删除</button>` : ''}
+                    </div>
+                `;
+                listEl.appendChild(div);
+
+                // 填充下拉框
+                const op = new Option(u.username, u.id);
+                quotaSel.add(op.cloneNode(true));
+                scanSel.add(op);
+            });
+        } catch (e) { listEl.textContent = '加载用户列表失败'; }
+    }
+
+    async function addUser() {
+        const u = document.getElementById('newUsername').value;
+        const p = document.getElementById('newPassword').value;
+        if(!u || !p) return showMsg('请输入用户名和密码', 'error');
+        try {
+            await axios.post('/api/admin/add-user', { username: u, password: p });
+            showMsg('用户添加成功');
+            loadUsers();
+            document.getElementById('newUsername').value = '';
+            document.getElementById('newPassword').value = '';
+        } catch (e) { showMsg('添加失败: ' + (e.response?.data?.message || e.message), 'error'); }
+    }
+
+    async function changePassword(id, username) {
+        const newPass = prompt(`请输入用户 "${username}" 的新密码:`);
+        if (newPass === null) return; // Cancelled
+        if (!newPass.trim()) return showMsg('密码不能为空', 'error');
+
+        try {
+            await axios.post('/api/admin/change-password', { userId: id, newPassword: newPass });
+            showMsg(`用户 ${username} 密码已修改`);
+        } catch (e) {
+            showMsg('修改失败: ' + (e.response?.data?.message || e.message), 'error');
+        }
+    }
+
+    async function delUser(id) {
+        if(!confirm('确定要删除该用户吗？其文件将被保留在数据库中（孤立）。')) return;
+        try {
+            await axios.post('/api/admin/delete-user', { userId: id });
+            showMsg('用户已删除');
+            loadUsers();
+        } catch(e) { showMsg('删除失败', 'error'); }
+    }
+
+    async function setQuota() {
+        const uid = document.getElementById('quotaUserSelect').value;
+        const limitGB = document.getElementById('quotaValue').value;
+        if(!uid) return showMsg('请选择用户', 'error');
+        
+        // 转换 GB 为 Bytes (1 GB = 1024 * 1024 * 1024 Bytes)
+        // 如果输入为 0 或空，则设为 0（无限）
+        let maxBytes = 0;
+        if (limitGB && parseFloat(limitGB) > 0) {
+            maxBytes = Math.floor(parseFloat(limitGB) * 1024 * 1024 * 1024);
+        }
+
+        try {
+            await axios.post('/api/admin/set-quota', { userId: uid, maxBytes: maxBytes });
+            showMsg('配额已更新');
+            loadUsers();
+        } catch(e) { showMsg('设置失败', 'error'); }
+    }
+
+    async function scanStorage() {
+        const uid = document.getElementById('scanUserSelect').value;
+        if(!uid) return;
+        const logEl = document.getElementById('scanLog');
+        logEl.style.display = 'block';
+        logEl.textContent = '正在发起扫描...\n';
+        
+        try {
+            const response = await fetch('/api/admin/scan', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ userId: uid })
+            });
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            
+            while(true) {
+                const { done, value } = await reader.read();
+                if(done) break;
+                const text = decoder.decode(value);
+                logEl.textContent += text;
+                logEl.scrollTop = logEl.scrollHeight;
+            }
+        } catch(e) {
+            logEl.textContent += `\n扫描出错: ${e.message}`;
+        }
+    }
+
+    function formatSize(bytes) {
+        if (bytes === 0) return '0 B';
+        const k = 1024;
+        const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+    }
+</script>
+
+</body>
+</html>
+
