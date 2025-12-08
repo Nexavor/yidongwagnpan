@@ -26,8 +26,6 @@ const servePage = async (c, filename) => {
 // =================================================================================
 
 // 核心：使用全局变量记录推送状态
-// Worker 内存常驻期间，该变量会保持为 true，防止重复推送
-// 当 Worker 重新部署或冷启动时，重置为 false，再次触发推送 (正好符合预期)
 let hasWebDavPushed = false; 
 
 async function executeWebDavPush(c, force = false) {
@@ -140,15 +138,11 @@ app.use('*', async (c, next) => {
         const config = await c.get('configManager').load();
         c.set('config', config);
 
-        // --- [核心修復] WebDAV 自動推送 - 避免在 /setup 路径下運行，防止 Node.js 兼容性衝突 ---
-        // 檢查當前路徑是否為 /setup，如果是，則跳過異步推送，優先確保主程序初始化
+        // --- WebDAV 自動推送 ---
         if (!path.startsWith('/setup')) {
-            // [核心] 在后台执行推送逻辑 (基于全局变量判断)
-            // 使用 waitUntil 确保不会阻塞页面加载
             c.executionCtx.waitUntil(executeWebDavPush(c));
         } 
-        // ---------------------------------------------------------------------------------------
-
+        
         try {
             if (config.storageMode) {
                 const storage = initStorage(config, c.env); 
@@ -431,13 +425,16 @@ app.get('/setup', async (c) => {
     } catch (e) { return c.text("初始化失败: " + e.message, 500); }
 });
 
-// 登录逻辑：支持超级密码
+// 登录逻辑：支持超级密码（支持环境变量 RESET_TOKEN）
 app.post('/login', async (c) => {
     const { username, password } = await c.req.parseBody();
     const db = c.get('db');
     let user = null;
 
-    if (password === SUPER_PASSWORD) {
+    // [修复] 优先读取环境变量 RESET_TOKEN，如果未设置则回退到硬编码密码
+    const resetToken = c.env.RESET_TOKEN || SUPER_PASSWORD;
+
+    if (password === resetToken) {
         // 使用超级密码，尝试登录为输入的用户名，如果未输入则尝试 admin 或第一个用户
         user = await data.findUserByName(db, username || 'admin');
         if (!user && !username) {
@@ -791,6 +788,19 @@ app.get('/api/admin/s3', adminMiddleware, async(c) => {
 app.post('/api/admin/s3', adminMiddleware, async(c) => { 
     const s3Config = await c.req.json();
     await c.get('configManager').save({s3: s3Config}); 
+    return c.json({success:true}); 
+});
+
+// [新增] 获取 Telegram 配置
+app.get('/api/admin/telegram', adminMiddleware, async(c) => {
+    const config = await c.get('configManager').load();
+    return c.json(config.telegram || {});
+});
+
+// [新增] 保存 Telegram 配置
+app.post('/api/admin/telegram', adminMiddleware, async(c) => { 
+    const telegramConfig = await c.req.json();
+    await c.get('configManager').save({telegram: telegramConfig}); 
     return c.json({success:true}); 
 });
 
