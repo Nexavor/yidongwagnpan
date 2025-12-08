@@ -18,12 +18,24 @@
         .form-row { display: flex; gap: 15px; margin-bottom: 15px; }
         .form-row .form-group { flex: 1; margin-bottom: 0; }
         
+        /* 基础按钮样式 */
         .btn { padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer; font-size: 0.9rem; transition: opacity 0.2s; color: #fff; }
         .btn:hover { opacity: 0.9; }
-        .primary-btn { background-color: #007bff; }
-        .success-btn { background-color: #28a745; }
-        .danger-btn { background-color: #dc3545; }
+        /* 取消点击后的聚焦轮廓 */
+        .btn:focus, .btn:active { outline: none; box-shadow: none; }
+        
+        /* 按钮颜色定义 (增加 :hover, :active 覆盖 manager.css 的默认白色背景) */
+        .primary-btn { background-color: #007bff; color: #fff; }
+        .primary-btn:hover, .primary-btn:active { background-color: #0069d9; color: #fff; }
+
+        .success-btn { background-color: #28a745; color: #fff; }
+        .success-btn:hover, .success-btn:active { background-color: #218838; color: #fff; } /* 修复：点击变白问题 */
+
+        .danger-btn { background-color: #dc3545; color: #fff; }
+        .danger-btn:hover, .danger-btn:active { background-color: #c82333; color: #fff; }
+
         .warning-btn { background-color: #ffc107; color: #333; }
+        .warning-btn:hover, .warning-btn:active { background-color: #e0a800; color: #333; }
 
         .user-list-item { display: flex; justify-content: space-between; align-items: center; padding: 10px; border-bottom: 1px solid #eee; }
         .user-list-item:last-child { border-bottom: none; }
@@ -463,4 +475,3 @@
 
 </body>
 </html>
-
