@@ -4,8 +4,10 @@ export default class Database {
     }
 
     async initDB() {
+        // [修复] 使用 this.run() 代替 this.d1.exec() 以避免本地环境下的兼容性错误
+        
         // 用户表
-        await this.d1.exec(`
+        await this.run(`
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 username TEXT NOT NULL UNIQUE,
@@ -17,7 +19,7 @@ export default class Database {
 
         // 文件夹表
         // 注意：增加 is_deleted 默认值，增加 share 相关字段
-        await this.d1.exec(`
+        await this.run(`
             CREATE TABLE IF NOT EXISTS folders (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
@@ -36,7 +38,7 @@ export default class Database {
 
         // 文件表
         // 注意：增加 is_deleted 默认值，增加 share 相关字段
-        await this.d1.exec(`
+        await this.run(`
             CREATE TABLE IF NOT EXISTS files (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 message_id TEXT NOT NULL,
@@ -58,7 +60,7 @@ export default class Database {
         `);
 
         // 认证 Token 表
-        await this.d1.exec(`
+        await this.run(`
             CREATE TABLE IF NOT EXISTS auth_tokens (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
