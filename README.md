@@ -1,16 +1,17 @@
 ## ☁️ 通过 Cloudflare Dashboard 手动上传部署或github导入
 
 可以直接通过 Cloudflare 网页控制台完成部署。这种方式非常直观，适合手动发布。
+# 支持webdav/S3/telegram,打造属于自己的专属网盘。
 ## 受限于Cloudflare的内存和CPU的限制无法完成在线打包，所以不支持文件夹下载。
 ### 1. 准备工作
     * 登录 Cloudflare Dashboard。
-    * 在左侧菜单 **Workers & Pages** -> **KV** 中，创建一个命名空间（建议命名：`netdrv-kv`）。
-    * 在左侧菜单 **Workers & Pages** -> **D1** 中，创建一个数据库（建议命名：`netfile-db`）。
+    * 在左侧菜单 Workers & Pages-> KV 中，创建一个命名空间（建议命名：netdrv-kv）。
+    * 在左侧菜单 Workers & Pages -> D1 中，创建一个数据库（建议命名：netfile-db）。
 
 ### 2. 创建项目并上传代码
 1.  进入 **Workers & Pages** 页面。
 2.  点击 **Create application** -> 切换到 **Pages** 标签 -> 点击 **Upload assets**。
-3.  输入项目名称（例如 `netdrv`），点击 **Create project**。
+3.  输入项目名称，点击 **Create project**。
 4.  在 **"Upload assets"** 步骤，将你准备好的文件夹内的**所有文件**拖入上传区域。
 5.  点击 **Deploy site**。
     > ⚠️ **注意**：此时虽然显示部署成功，但网站还无法正常运行（会报错 500），因为尚未绑定数据库和设置兼容性标志。请继续下一步。
@@ -67,5 +68,22 @@
 * **默认账号**: `admin`
 * **默认密码**: `admin`
 * *请登录后立即在设置中修改密码。*
+### 7. 重置账户密码
+执行 SQL 语句
+登陆 Cloudflare Dashboard，进入 D1 数据库 Console 控制台，执行以下 SQL   
+```bash
+UPDATE users SET password = '$2a$10$KgtZ.y6HUmQBTRUA0FVKqO5s0esptlR5HupHYvgh.H.g7gpDkPDl.' WHERE username = 'admin'
+```  
+可将密码重置为账号 admin / 密码 admin
 
-
+### 8. 重置加密文件夹密码
+执行 SQL 语句
+登陆 Cloudflare Dashboard，进入 D1 数据库 Console 控制台，执行以下 SQL   
+```bash
+SELECT id, name, user_id FROM folders WHERE name = '你的加密文件夹名称'
+```
+获得文件夹ID   
+```bash
+UPDATE folders SET password = NULL WHERE id = 文件夹ID
+```   
+可清除密码
