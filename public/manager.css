@@ -366,3 +366,31 @@ body.auth-page {
     .task-status-bar { left: 10px; right: 10px; bottom: 50px; justify-content: space-between; }
     .preview-content { width: 95%; height: 90vh; }
 }
+
+/* 排序表头样式 */
+.sortable {
+    cursor: pointer;
+    user-select: none;
+    transition: background-color 0.2s;
+    position: relative;
+}
+
+.sortable:hover {
+    background-color: #e9ecef !important; /* 加深颜色以示可点击 */
+    color: var(--primary-color);
+}
+
+.sort-icon {
+    font-size: 0.8rem;
+    color: #999;
+    margin-left: 5px;
+}
+
+.sortable.active {
+    color: var(--primary-color);
+    background-color: #f1f3f5;
+}
+
+.sortable.active .sort-icon {
+    color: var(--primary-color);
+}
