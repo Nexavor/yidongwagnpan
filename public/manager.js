@@ -62,6 +62,9 @@ document.addEventListener('DOMContentLoaded', () => {
     let viewMode = localStorage.getItem('viewMode') || 'grid'; 
     let isTrashMode = false;
     
+    // [新增] 排序状态：默认按名称升序
+    let sortState = { field: 'name', direction: 'asc' };
+
     // 冲突解决状态
     let conflictResolutionState = { applyToAll: false, choice: null };
     
@@ -413,6 +416,72 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // 5. 其他逻辑函数
+    
+    // [新增] 排序核心逻辑
+    function applySort() {
+        if (!items || items.length === 0) {
+            renderItems([]);
+            return;
+        }
+
+        items.sort((a, b) => {
+            let valA, valB;
+            
+            // 提取比较值
+            if (sortState.field === 'name') {
+                valA = a.name || '';
+                valB = b.name || '';
+                // 中文名称排序
+                return sortState.direction === 'asc' 
+                    ? valA.localeCompare(valB, "zh-CN", { numeric: true }) 
+                    : valB.localeCompare(valA, "zh-CN", { numeric: true });
+            } 
+            else if (sortState.field === 'size') {
+                // 文件夹在前，同类型按大小
+                if (a.type !== b.type) {
+                     return a.type === 'folder' ? -1 : 1;
+                }
+                valA = a.size || 0;
+                valB = b.size || 0;
+            } 
+            else if (sortState.field === 'date') {
+                valA = new Date(a.date || a.deleted_at || 0).getTime();
+                valB = new Date(b.date || b.deleted_at || 0).getTime();
+            }
+
+            // 通用数字比较
+            if (valA < valB) return sortState.direction === 'asc' ? -1 : 1;
+            if (valA > valB) return sortState.direction === 'asc' ? 1 : -1;
+            return 0;
+        });
+
+        renderItems(items);
+        updateSortIcons();
+    }
+
+    // [新增] 更新表头图标 UI
+    function updateSortIcons() {
+        document.querySelectorAll('.sortable').forEach(th => {
+            const field = th.dataset.sort;
+            const icon = th.querySelector('.sort-icon');
+            
+            if (!icon) return;
+
+            // 重置样式
+            th.classList.remove('active');
+            icon.className = 'fas fa-sort sort-icon'; // 默认双向箭头
+
+            // 设置当前激活项
+            if (field === sortState.field) {
+                th.classList.add('active');
+                if (sortState.direction === 'asc') {
+                    icon.className = 'fas fa-sort-up sort-icon';
+                } else {
+                    icon.className = 'fas fa-sort-down sort-icon';
+                }
+            }
+        });
+    }
 
     async function updateQuota() {
         try {
@@ -493,7 +562,10 @@ document.addEventListener('DOMContentLoaded', () => {
             items = [...data.contents.folders, ...data.contents.files];
             currentPath = data.path;
             renderBreadcrumb();
-            renderItems(items);
+            
+            // [修改] 在渲染前应用排序，applySort 内部会调用 renderItems
+            applySort();
+
             updateFolderSelectForUpload(data.contents.folders);
             const newUrl = `/view/${encryptedId}`;
             if (window.location.pathname !== newUrl) {
@@ -585,6 +657,22 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // --- 事件绑定区 ---
+    
+    // [新增] 表头排序点击事件
+    document.querySelectorAll('.sortable').forEach(th => {
+        th.addEventListener('click', () => {
+            const field = th.dataset.sort;
+            if (sortState.field === field) {
+                // 如果点击当前排序列，切换方向
+                sortState.direction = sortState.direction === 'asc' ? 'desc' : 'asc';
+            } else {
+                // 如果点击新列，默认升序
+                sortState.field = field;
+                sortState.direction = 'asc';
+            }
+            applySort();
+        });
+    });
 
     // 背景右键
     const mainContent = document.querySelector('.main-content');
