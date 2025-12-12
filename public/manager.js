@@ -1,4 +1,4 @@
-// public/manager.js - 完整全功能版 (含前端打包下载 & 排序功能)
+// public/manager.js - 修复文件夹下载 ID 问题
 
 // =================================================================================
 // 1. 全局工具函数 (无依赖，放在最外层)
@@ -809,7 +809,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
     
-    // --- [修改] 下载功能：支持文件夹前端打包 ---
+    // --- [修改] 下载功能：修复 ID 问题，支持文件夹递归下载 ---
     if(downloadBtn) downloadBtn.addEventListener('click', async () => {
         if (selectedItems.size === 0) return;
 
@@ -872,13 +872,18 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             }
 
-            // 开始遍历选中项
+            // [核心修复] 开始遍历选中项 (使用 encrypted_id 而不是 id)
             for (const itemObj of selectedList) {
-                await traverse(itemObj.id, itemObj.type, '', itemObj.item.name);
+                let targetId = itemObj.id;
+                // 如果是文件夹，必须使用 encrypted_id 进行 API 请求
+                if (itemObj.type === 'folder' && itemObj.item.encrypted_id) {
+                    targetId = itemObj.item.encrypted_id;
+                }
+                await traverse(targetId, itemObj.type, '', itemObj.item.name);
             }
 
             if (filesToZip.length === 0) {
-                TaskManager.error('没有可下载的文件');
+                TaskManager.error('无可下载文件(文件夹可能为空)');
                 return;
             }
 
