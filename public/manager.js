@@ -1261,7 +1261,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // =================================================================================
-    // [重构] 智能移动处理器 (修复 ID 问题与递归合并)
+    // [重构] 智能移动处理器 (修复：跳过时不删除源文件夹)
     // =================================================================================
     const SmartMover = {
         globalChoice: null,
@@ -1333,8 +1333,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
             try {
                 // A. 检查目标位置冲突
-                // /api/file/check 接口目前设计主要用于上传验重，但也可用作简单的同名检查
-                // 为了保险，我们结合目标文件夹的内容列表进行判断
                 
                 // 获取目标文件夹内容 (targetFolderId 是加密ID)
                 const targetRes = await axios.get(`/api/folder/${targetFolderId}?t=${Date.now()}`);
@@ -1372,7 +1370,6 @@ document.addEventListener('DOMContentLoaded', () => {
             } catch (e) {
                 if (e.message === 'USER_CANCEL') throw e;
                 console.warn(`检查冲突失败 (${name})，尝试默认移动`, e);
-                // 如果检查失败（如网络抖动），默认尝试直接移动（后端会报错或自动处理）
             }
 
             if (!performAction) return;
@@ -1389,7 +1386,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 const sourceContents = sourceRes.data.contents;
 
                 // 2. 找到目标子文件夹的加密 ID (作为下一级的 targetFolderId)
-                // 因为是合并，前面检查已确认目标存在同名文件夹
                 const targetRes = await axios.get(`/api/folder/${targetFolderId}?t=${Date.now()}`);
                 const targetSubFolder = targetRes.data.contents.folders.find(f => f.name === name);
                 
@@ -1398,7 +1394,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 // 3. 递归移动源文件夹内的所有文件
                 for (const file of sourceContents.files) {
-                    // 文件没有 encrypted_id，传 null 即可
                     await this.recursiveMove('file', file.message_id, null, file.fileName, nextTargetId);
                 }
 
@@ -1407,17 +1402,24 @@ document.addEventListener('DOMContentLoaded', () => {
                     await this.recursiveMove('folder', folder.id, folder.encrypted_id, folder.name, nextTargetId);
                 }
 
-                // 5. 合并完成后，尝试删除空的源文件夹
-                // 使用原始 ID 删除
+                // 5. [核心修复] 合并完成后，必须检查源文件夹是否为空
                 try {
-                    await axios.post('/api/delete', { files: [], folders: [id], permanent: false });
+                    const checkRes = await axios.get(`/api/folder/${encryptedId}?t=${Date.now()}`);
+                    const leftovers = checkRes.data.contents;
+                    
+                    if (leftovers.files.length === 0 && leftovers.folders.length === 0) {
+                        // 只有确认由空，才执行删除 (使用原始 id)
+                        await axios.post('/api/delete', { files: [], folders: [id], permanent: false });
+                    } else {
+                        // 如果不为空，说明有项目被跳过，保留文件夹
+                        console.log(`[SmartMover] 源文件夹 "${name}" 非空，已保留。`);
+                    }
                 } catch (delErr) {
-                    console.log(`源文件夹 ${name} 可能非空（部分跳过），未删除`);
+                    console.warn('合并后清理源文件夹失败:', delErr);
                 }
 
             } else {
                 // === 分支 2: 标准移动 (调用后端) ===
-                // 使用原始 ID 调用 API
                 await axios.post('/api/move', { 
                     files: type === 'file' ? [id] : [], 
                     folders: type === 'folder' ? [id] : [], 
@@ -1814,3 +1816,4 @@ document.addEventListener('DOMContentLoaded', () => {
     loadFolder(currentFolderId);
     updateQuota();
 });
+
