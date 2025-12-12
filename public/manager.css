@@ -317,7 +317,10 @@ body.auth-page {
 #modalContent pre { text-align: left; background: #fff; padding: 20px; width: 100%; height: 100%; margin: 0; overflow: auto; border: none; }
 #modalContent img, #modalContent video { max-width: 100%; max-height: 100%; object-fit: contain; }
 .no-preview { color: #666; }
-.upload-link-btn { display: inline-block; padding: 10px 20px; background: var(--primary-color); color: white; text-decoration: none; border-radius: 4px; margin-top: 20px; }
+
+/* [修改] 增加 hover 样式，防止被 .btn:hover 的白色背景覆盖 */
+.upload-link-btn { display: inline-block; padding: 10px 20px; background: var(--primary-color); color: white; text-decoration: none; border-radius: 4px; margin-top: 20px; transition: background-color 0.2s; }
+.upload-link-btn:hover { background: var(--primary-hover); color: white; text-decoration: none; }
 
 /* --- 编辑器 --- */
 .editor-container { display: flex; flex-direction: column; height: 100vh; background: #fff; }
