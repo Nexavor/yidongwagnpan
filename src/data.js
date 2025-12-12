@@ -814,3 +814,37 @@ export async function scanStorageAndImport(db, storage, userId, storageType, log
         throw e;
     }
 }
+
+/**
+ * 递归获取分享文件夹下的所有文件（包含相对路径）
+ */
+export async function getShareFolderAllFiles(db, folderId, userId) {
+    const filesList = [];
+    
+    // 递归辅助函数
+    async function recurse(currentId, currentPath) {
+        // 1. 获取当前目录下的文件
+        const sqlFiles = `SELECT CAST(message_id AS TEXT) AS message_id, fileName, size, file_id, storage_type, thumb_file_id FROM files WHERE folder_id = ? AND user_id = ? AND deleted_at IS NULL`;
+        const files = await db.all(sqlFiles, [currentId, userId]);
+        
+        for (const f of files) {
+            filesList.push({
+                ...f,
+                // 构建相对路径，例如 "子文件夹/文件.txt"
+                zipPath: currentPath ? `${currentPath}/${f.fileName}` : f.fileName
+            });
+        }
+
+        // 2. 获取子文件夹并递归
+        const sqlFolders = `SELECT id, name FROM folders WHERE parent_id = ? AND user_id = ? AND deleted_at IS NULL`;
+        const folders = await db.all(sqlFolders, [currentId, userId]);
+        
+        for (const f of folders) {
+            const nextPath = currentPath ? `${currentPath}/${f.name}` : f.name;
+            await recurse(f.id, nextPath);
+        }
+    }
+
+    await recurse(folderId, "");
+    return filesList;
+}
