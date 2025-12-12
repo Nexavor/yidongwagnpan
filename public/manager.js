@@ -212,23 +212,23 @@ document.addEventListener('DOMContentLoaded', () => {
     // 2. 冲突解决弹窗函数 (支持合并选项)
     let conflictMergeBtn = document.getElementById('conflictMergeBtn');
 
-    // 动态注入合并按钮（如果 HTML 中不存在）
+    // 动态注入合并按钮（修正版：适配 HTML 结构）
     function ensureMergeButton() {
-        if (!conflictMergeBtn && document.getElementById('conflictOptions')) {
+        conflictMergeBtn = document.getElementById('conflictMergeBtn');
+        if (conflictMergeBtn) return;
+
+        const renameBtn = document.getElementById('conflictRenameBtn');
+        if (renameBtn && renameBtn.parentNode) {
             conflictMergeBtn = document.createElement('button');
             conflictMergeBtn.id = 'conflictMergeBtn';
-            conflictMergeBtn.className = 'btn btn-info'; // 使用与其他按钮类似的样式
+            conflictMergeBtn.className = 'btn full-width'; 
             conflictMergeBtn.style.backgroundColor = '#17a2b8';
             conflictMergeBtn.style.color = 'white';
+            conflictMergeBtn.style.border = 'none';
             conflictMergeBtn.style.display = 'none'; // 默认隐藏
-            conflictMergeBtn.innerHTML = '<i class="fas fa-code-branch"></i> 合并';
+            conflictMergeBtn.innerHTML = '<i class="fas fa-code-branch"></i> 合并文件夹 (智能合并内容)';
             
-            // 插入到“重命名”按钮之后
-            const renameBtn = document.getElementById('conflictRenameBtn');
-            if (renameBtn && renameBtn.parentNode) {
-                renameBtn.parentNode.insertBefore(conflictMergeBtn, renameBtn.nextSibling);
-                conflictMergeBtn.style.marginLeft = '10px';
-            }
+            renameBtn.parentNode.insertBefore(conflictMergeBtn, renameBtn.nextSibling);
         }
     }
 
@@ -254,7 +254,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             // 控制合并按钮显示
             if (conflictMergeBtn) {
-                conflictMergeBtn.style.display = isFolder ? 'inline-block' : 'none';
+                conflictMergeBtn.style.display = isFolder ? 'block' : 'none';
             }
 
             const cleanup = () => {
@@ -276,8 +276,6 @@ document.addEventListener('DOMContentLoaded', () => {
             if(btnOverwrite) btnOverwrite.onclick = () => handleChoice('overwrite');
             if(btnSkip) btnSkip.onclick = () => handleChoice('skip');
             if(btnCancel) btnCancel.onclick = () => handleChoice('cancel');
-            
-            // 新增合并点击事件
             if(conflictMergeBtn) conflictMergeBtn.onclick = () => handleChoice('merge');
         });
     }
@@ -1172,29 +1170,6 @@ document.addEventListener('DOMContentLoaded', () => {
             setTimeout(() => { copyLinkBtn.textContent = originalText; copyLinkBtn.classList.remove('success-btn'); }, 2000);
         });
     });
-
-    // 移动功能
-    if (moveBtn) {
-        moveBtn.addEventListener('click', () => {
-            if (selectedItems.size === 0) return;
-            selectedMoveTargetId = null;
-            confirmMoveBtn.disabled = true;
-            moveModal.style.display = 'block';
-            loadFolderTree();
-        });
-    }
-    
-    if(cancelMoveBtn) cancelMoveBtn.addEventListener('click', () => moveModal.style.display = 'none');
-
-    async function loadFolderTree() {
-        if(folderTree) folderTree.innerHTML = '<div style="padding:10px;color:#666;">加载中...</div>';
-        try {
-            const res = await axios.get('/api/folders');
-            renderFolderTree(res.data);
-        } catch (e) {
-            if(folderTree) folderTree.innerHTML = `<div style="color:red;padding:10px;">加载失败: ${e.message}</div>`;
-        }
-    }
     function renderFolderTree(folders) {
         const movingFolderIds = new Set();
         selectedItems.forEach(itemStr => {
@@ -1269,7 +1244,7 @@ document.addEventListener('DOMContentLoaded', () => {
         async start(selectedItems, targetFolderId, itemsData, loadFolderCallback) {
             this.globalChoice = null;
             
-            // 准备队列
+            // 准备移动队列
             const queue = [];
             selectedItems.forEach(id => {
                 const [type, realId] = parseItemId(id);
@@ -1320,7 +1295,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             try {
                 // 1. 检查冲突
-                // 先简单请求后端检查是否存在同名项
+                // 先简单请求后端检查是否存在同名项 (此接口通常检查文件)
                 const checkRes = await axios.post('/api/file/check', {
                     folderId: targetFolderId, 
                     fileName: name 
@@ -1375,24 +1350,25 @@ document.addEventListener('DOMContentLoaded', () => {
                 const sourceRes = await axios.get(`/api/folder/${id}?t=${Date.now()}`);
                 const sourceContents = sourceRes.data.contents;
 
-                // B. 获取目标子文件夹ID
+                // B. 获取目标子文件夹ID (因为是合并，目标肯定已存在，找到它的ID)
                 const targetRes = await axios.get(`/api/folder/${targetFolderId}?t=${Date.now()}`);
                 const targetSubFolder = targetRes.data.contents.folders.find(f => f.name === name);
                 
                 if (!targetSubFolder) throw new Error(`合并目标文件夹 ${name} 丢失`);
                 const nextTargetId = targetSubFolder.encrypted_id;
 
-                // C. 递归移动文件
+                // C. 递归移动源文件夹内的文件
                 for (const file of sourceContents.files) {
                     await this.recursiveMove('file', file.message_id, file.fileName, nextTargetId);
                 }
 
-                // D. 递归移动文件夹
+                // D. 递归移动源文件夹内的子文件夹
                 for (const folder of sourceContents.folders) {
                     await this.recursiveMove('folder', folder.encrypted_id, folder.name, nextTargetId);
                 }
 
-                // E. 尝试删除空的源文件夹
+                // E. 合并完成后，源文件夹应该是空的，尝试将其删除
+                // 注意：如果用户在子项中选择了“跳过”，源文件夹可能不为空，此时删除会失败或我们需要保留它
                 try {
                     await axios.post('/api/delete', { files: [], folders: [id], permanent: false });
                 } catch (delErr) {
