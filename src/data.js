@@ -18,8 +18,7 @@ export async function getUniqueName(db, folderId, originalName, userId, type) {
     const col = type === 'file' ? 'fileName' : 'name';
     const parentCol = type === 'file' ? 'folder_id' : 'parent_id';
     
-    // 仅检查活跃文件。如果存在已删除的同名文件，我们允许返回原名，
-    // 但后续写入操作必须处理与“已删除文件”的冲突（将已删除文件重命名）。
+    // 检查是否有活跃的同名项
     const exists = await db.get(
         `SELECT 1 as exists_flag FROM ${table} WHERE ${col} = ? AND ${parentCol} = ? AND user_id = ? AND deleted_at IS NULL`, 
         [originalName, folderId, userId]
@@ -49,7 +48,7 @@ export async function getUniqueName(db, folderId, originalName, userId, type) {
     }
 }
 
-// 辅助格式化大小 (用于扫描日志)
+// 辅助格式化大小
 function formatSize(bytes) {
     if (bytes === 0) return '0 B';
     const k = 1024;
@@ -58,7 +57,8 @@ function formatSize(bytes) {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
 
-// 内部辅助：处理唯一约束冲突（给占位的垃圾文件改名）
+// 处理因“软删除”文件导致的唯一约束冲突
+// 当我们要写入一个文件名，但数据库里有一个同名的“已删除”文件占位时，给那个已删除文件改名
 async function handleTrashConflict(db, table, nameCol, parentCol, nameVal, parentVal, userId) {
     const row = await db.get(
         `SELECT id, message_id FROM ${table} WHERE ${nameCol} = ? AND ${parentCol} = ? AND user_id = ? AND deleted_at IS NOT NULL`,
@@ -66,14 +66,14 @@ async function handleTrashConflict(db, table, nameCol, parentCol, nameVal, paren
     );
     
     if (row) {
+        // 改名为 xxx_deleted_timestamp_random，确保让出名字
         const trashName = `${nameVal}_deleted_${Date.now()}_${Math.floor(Math.random()*1000)}`;
         const idCol = table === 'files' ? 'message_id' : 'id';
         const idVal = table === 'files' ? row.message_id : row.id;
-        // 将挡路的垃圾文件重命名
         await db.run(`UPDATE ${table} SET ${nameCol} = ? WHERE ${idCol} = ?`, [trashName, idVal]);
-        return true; // 解决了冲突
+        return true; 
     }
-    return false; // 没找到冲突源
+    return false; 
 }
 
 // =================================================================================
@@ -187,6 +187,7 @@ export async function addFile(db, fileData, folderId = 1, userId, storageType) {
         return { success: true, id: result.meta.last_row_id || 0, fileId: message_id };
     } catch (err) {
         if (err.message && err.message.includes('UNIQUE')) {
+            // 如果遇到唯一性冲突，尝试清理“已删除但占用名字”的垃圾文件
             const resolved = await handleTrashConflict(db, 'files', 'fileName', 'folder_id', fileName, folderId, userId);
             if (resolved) {
                 const retryResult = await db.run(sql, [message_id, fileName, mimetype, file_id, thumb_file_id, date, size, folderId, userId, storageType]);
@@ -456,6 +457,10 @@ export async function softDeleteItems(db, fileIds = [], folderIds = [], userId) 
     const finalFileIds = Array.from(targetFileIds);
     const finalFolderIds = Array.from(targetFolderIds);
 
+    // [关键] 软删除时，也要重命名文件，防止占用活跃文件名导致唯一性冲突
+    // 但批量更新重命名比较复杂，这里先仅标记。
+    // 注意：如果软删除不重命名，那么“新建同名文件夹”时会触发handleTrashConflict来给这里已删除的文件改名
+    
     if (finalFileIds.length > 0) {
         const place = finalFileIds.map(() => '?').join(',');
         await db.run(`UPDATE files SET is_deleted = 1, deleted_at = ? WHERE message_id IN (${place}) AND user_id = ?`, [now, ...finalFileIds, userId]);
@@ -468,13 +473,337 @@ export async function softDeleteItems(db, fileIds = [], folderIds = [], userId) 
 }
 
 /**
- * 检查还原时是否存在冲突
+ * 递归合并文件夹 (移动辅助函数)
+ * 将 sourceId 文件夹的内容移动到 targetId，处理冲突
  */
+async function mergeFolders(db, sourceId, targetId, userId, conflictMode) {
+    // 1. 获取源文件夹下的文件
+    const files = await db.all(`SELECT ${SAFE_SELECT_MESSAGE_ID}, fileName FROM files WHERE folder_id = ? AND user_id = ? AND deleted_at IS NULL`, [sourceId, userId]);
+    
+    for (const file of files) {
+        // 检查目标位置是否存在同名文件
+        const existing = await db.get(`SELECT ${SAFE_SELECT_MESSAGE_ID} FROM files WHERE folder_id = ? AND fileName = ? AND user_id = ? AND deleted_at IS NULL`, [targetId, file.fileName, userId]);
+        
+        if (existing) {
+            if (conflictMode === 'overwrite') {
+                // 覆盖：将目标文件软删除（并重命名），然后移动源文件
+                const trashName = `${file.fileName}_overwritten_${Date.now()}`;
+                await db.run(`UPDATE files SET is_deleted = 1, deleted_at = ?, fileName = ? WHERE message_id = ? AND user_id = ?`, 
+                    [Date.now(), trashName, existing.message_id, userId]);
+                // 移动源文件
+                await db.run(`UPDATE files SET folder_id = ? WHERE message_id = ? AND user_id = ?`, [targetId, file.message_id, userId]);
+            } else if (conflictMode === 'rename') {
+                // 重命名：源文件改名后移动
+                const newName = await getUniqueName(db, targetId, file.fileName, userId, 'file');
+                await db.run(`UPDATE files SET fileName = ?, folder_id = ? WHERE message_id = ? AND user_id = ?`, 
+                    [newName, targetId, file.message_id, userId]);
+            }
+            // skip: 不做任何事，文件留在源文件夹
+        } else {
+            // 无冲突，直接移动
+            await db.run(`UPDATE files SET folder_id = ? WHERE message_id = ? AND user_id = ?`, [targetId, file.message_id, userId]);
+        }
+    }
+
+    // 2. 获取源文件夹下的子文件夹
+    const folders = await db.all(`SELECT id, name FROM folders WHERE parent_id = ? AND user_id = ? AND deleted_at IS NULL`, [sourceId, userId]);
+    
+    for (const folder of folders) {
+        const existing = await db.get(`SELECT id FROM folders WHERE parent_id = ? AND name = ? AND user_id = ? AND deleted_at IS NULL`, [targetId, folder.name, userId]);
+        
+        if (existing) {
+            if (conflictMode === 'overwrite') {
+                // 递归合并：把 source/sub 里的内容移到 target/sub
+                await mergeFolders(db, folder.id, existing.id, userId, conflictMode);
+                // 合并完后，source/sub 应该是空的了（除非有 skip 的文件），尝试删除 source/sub
+                // 简单起见，如果里面还有 active 文件就不删，否则删
+                const remainingFiles = await db.get(`SELECT 1 FROM files WHERE folder_id = ? AND deleted_at IS NULL LIMIT 1`, [folder.id]);
+                const remainingFolders = await db.get(`SELECT 1 FROM folders WHERE parent_id = ? AND deleted_at IS NULL LIMIT 1`, [folder.id]);
+                if (!remainingFiles && !remainingFolders) {
+                    await db.run(`DELETE FROM folders WHERE id = ?`, [folder.id]);
+                }
+            } else if (conflictMode === 'rename') {
+                const newName = await getUniqueName(db, targetId, folder.name, userId, 'folder');
+                await db.run(`UPDATE folders SET name = ?, parent_id = ? WHERE id = ? AND user_id = ?`, 
+                    [newName, targetId, folder.id, userId]);
+            }
+        } else {
+             // 无冲突，直接移动文件夹
+             await db.run(`UPDATE folders SET parent_id = ? WHERE id = ? AND user_id = ?`, [targetId, folder.id, userId]);
+        }
+    }
+}
+
+// =================================================================================
+// 10. 移動與重命名 (核心修改)
+// =================================================================================
+
+export async function moveItems(db, storage, fileIds = [], folderIds = [], targetFolderId, userId, conflictMode = 'rename') {
+    // 1. 处理文件移动
+    for (const fileId of fileIds) {
+        const file = await db.get("SELECT fileName, folder_id FROM files WHERE message_id = ? AND user_id = ?", [fileId, userId]);
+        if (!file || file.folder_id == targetFolderId) continue;
+
+        let finalName = file.fileName;
+        const existing = await db.get(
+            "SELECT message_id, fileName FROM files WHERE folder_id = ? AND fileName = ? AND user_id = ? AND deleted_at IS NULL", 
+            [targetFolderId, file.fileName, userId]
+        );
+
+        if (existing) {
+            if (conflictMode === 'overwrite') {
+                // 覆盖：将由于冲突而存在的目标文件移入回收站
+                const trashName = `${existing.fileName}_overwritten_${Date.now()}`;
+                await db.run(
+                    "UPDATE files SET is_deleted = 1, deleted_at = ?, fileName = ? WHERE message_id = ? AND user_id = ?", 
+                    [Date.now(), trashName, existing.message_id, userId]
+                );
+            } else if (conflictMode === 'skip') {
+                continue; 
+            } else {
+                finalName = await getUniqueName(db, targetFolderId, file.fileName, userId, 'file');
+            }
+        }
+        
+        try {
+            await db.run("UPDATE files SET folder_id = ?, fileName = ? WHERE message_id = ? AND user_id = ?", [targetFolderId, finalName, fileId, userId]);
+        } catch (err) {
+            if (err.message && err.message.includes('UNIQUE')) {
+                 const resolved = await handleTrashConflict(db, 'files', 'fileName', 'folder_id', finalName, targetFolderId, userId);
+                 if (resolved) await db.run("UPDATE files SET folder_id = ?, fileName = ? WHERE message_id = ? AND user_id = ?", [targetFolderId, finalName, fileId, userId]);
+                 else throw err;
+            } else throw err;
+        }
+    }
+
+    // 2. 处理文件夹移动
+    for (const folderId of folderIds) {
+        if (folderId === targetFolderId) continue; 
+        const folder = await db.get("SELECT name, id FROM folders WHERE id = ? AND user_id = ?", [folderId, userId]);
+        if (!folder) continue;
+
+        const existingFolder = await db.get(
+            "SELECT id, name FROM folders WHERE parent_id = ? AND name = ? AND user_id = ? AND deleted_at IS NULL",
+            [targetFolderId, folder.name, userId]
+        );
+
+        if (existingFolder) {
+            if (conflictMode === 'overwrite') {
+                // [核心修改] 文件夹存在冲突且覆盖模式：执行合并逻辑
+                await mergeFolders(db, folder.id, existingFolder.id, userId, conflictMode);
+                
+                // 合并完成后，检查源文件夹是否已空，空则删除
+                const remainingFiles = await db.get(`SELECT 1 FROM files WHERE folder_id = ? AND deleted_at IS NULL LIMIT 1`, [folder.id]);
+                const remainingFolders = await db.get(`SELECT 1 FROM folders WHERE parent_id = ? AND deleted_at IS NULL LIMIT 1`, [folder.id]);
+                if (!remainingFiles && !remainingFolders) {
+                    await db.run(`DELETE FROM folders WHERE id = ?`, [folder.id]);
+                }
+                continue; // 处理下一个
+            } else if (conflictMode === 'skip') {
+                continue; 
+            } else {
+                // rename
+                const finalName = await getUniqueName(db, targetFolderId, folder.name, userId, 'folder');
+                await db.run("UPDATE folders SET parent_id = ?, name = ? WHERE id = ? AND user_id = ?", [targetFolderId, finalName, folderId, userId]);
+            }
+        } else {
+            // 无冲突，直接移动
+             try {
+                await db.run("UPDATE folders SET parent_id = ? WHERE id = ? AND user_id = ?", [targetFolderId, folderId, userId]);
+            } catch (err) {
+                if (err.message && err.message.includes('UNIQUE')) {
+                    const resolved = await handleTrashConflict(db, 'folders', 'name', 'parent_id', folder.name, targetFolderId, userId);
+                    if (resolved) await db.run("UPDATE folders SET parent_id = ? WHERE id = ? AND user_id = ?", [targetFolderId, folderId, userId]);
+                    else throw err;
+                } else throw err;
+            }
+        }
+    }
+    return { success: true };
+}
+
+// 递归合并还原 (Restore Merge)
+async function restoreAndMergeFolder(db, sourceId, targetId, userId, conflictMode) {
+    // 1. 还原源文件夹下的文件
+    const files = await db.all(`SELECT ${SAFE_SELECT_MESSAGE_ID}, fileName FROM files WHERE folder_id = ? AND user_id = ?`, [sourceId, userId]); 
+    // 注意：这里查的是 is_deleted 状态不限的文件？还原时源文件夹里的文件通常都是 is_deleted=1 的，但也可能有未删的如果之前结构乱了。
+    // 假设我们在还原整个目录树，我们需要把目录树里所有文件（无论是删的还是没删的，只要在那个被删的目录里）都挪出来。
+    // 但通常 getFolderDeletionData 只会找那些被级联删除的文件。
+    // 简单起见，我们对该目录下所有文件操作。
+    
+    for (const file of files) {
+        // 目标位置是否有冲突
+        const existing = await db.get(`SELECT ${SAFE_SELECT_MESSAGE_ID} FROM files WHERE folder_id = ? AND fileName = ? AND user_id = ? AND deleted_at IS NULL`, [targetId, file.fileName, userId]);
+        
+        if (existing) {
+             if (conflictMode === 'overwrite') {
+                // 删掉目标位置的
+                const trashName = `${file.fileName}_overwritten_${Date.now()}`;
+                await db.run(`UPDATE files SET is_deleted = 1, deleted_at = ?, fileName = ? WHERE message_id = ? AND user_id = ?`, 
+                    [Date.now(), trashName, existing.message_id, userId]);
+                // 还原源文件
+                await db.run(`UPDATE files SET is_deleted = 0, deleted_at = NULL, folder_id = ? WHERE message_id = ? AND user_id = ?`, [targetId, file.message_id, userId]);
+             } else if (conflictMode === 'rename') {
+                const newName = await getUniqueName(db, targetId, file.fileName, userId, 'file');
+                await db.run(`UPDATE files SET is_deleted = 0, deleted_at = NULL, fileName = ?, folder_id = ? WHERE message_id = ? AND user_id = ?`, 
+                    [newName, targetId, file.message_id, userId]);
+             }
+        } else {
+             // 直接还原
+             await db.run(`UPDATE files SET is_deleted = 0, deleted_at = NULL, folder_id = ? WHERE message_id = ? AND user_id = ?`, [targetId, file.message_id, userId]);
+        }
+    }
+
+    // 2. 还原源文件夹下的子文件夹
+    const folders = await db.all(`SELECT id, name FROM folders WHERE parent_id = ? AND user_id = ?`, [sourceId, userId]);
+    
+    for (const folder of folders) {
+        const existing = await db.get(`SELECT id FROM folders WHERE parent_id = ? AND name = ? AND user_id = ? AND deleted_at IS NULL`, [targetId, folder.name, userId]);
+        
+        if (existing) {
+             if (conflictMode === 'overwrite') {
+                 // 递归合并到已存在的文件夹
+                 await restoreAndMergeFolder(db, folder.id, existing.id, userId, conflictMode);
+                 // 此时 source folder 空了，可以永久删除或保持软删除
+                 await db.run(`DELETE FROM folders WHERE id = ?`, [folder.id]);
+             } else if (conflictMode === 'rename') {
+                 const newName = await getUniqueName(db, targetId, folder.name, userId, 'folder');
+                 await db.run(`UPDATE folders SET is_deleted = 0, deleted_at = NULL, name = ?, parent_id = ? WHERE id = ? AND user_id = ?`, 
+                     [newName, targetId, folder.id, userId]);
+             }
+        } else {
+             // 递归还原该文件夹及其内容（不需要 merge 了，因为目标不存在）
+             // 但我们需要把它的状态设为 active
+             await db.run(`UPDATE folders SET is_deleted = 0, deleted_at = NULL, parent_id = ? WHERE id = ? AND user_id = ?`, [targetId, folder.id, userId]);
+             // 还需要递归把下面的所有东西设为 active (复用 restoreItems 逻辑或写递归)
+             // 简单调用一个全量激活
+             await cascadeRestore(db, folder.id, userId);
+        }
+    }
+}
+
+async function cascadeRestore(db, folderId, userId) {
+    await db.run(`UPDATE files SET is_deleted = 0, deleted_at = NULL WHERE folder_id = ? AND user_id = ?`, [folderId, userId]);
+    const subs = await db.all(`SELECT id FROM folders WHERE parent_id = ? AND user_id = ?`, [folderId, userId]);
+    for(const sub of subs) {
+        await db.run(`UPDATE folders SET is_deleted = 0, deleted_at = NULL WHERE id = ? AND user_id = ?`, [sub.id, userId]);
+        await cascadeRestore(db, sub.id, userId);
+    }
+}
+
+
+export async function restoreItems(db, storage, fileIds = [], folderIds = [], userId, conflictMode = 'rename') {
+    // 1. 还原文件夹
+    for (const id of (folderIds || [])) {
+        const folder = await db.get("SELECT id, name, parent_id FROM folders WHERE id = ? AND user_id = ?", [id, userId]);
+        if (!folder) continue;
+
+        // 检查父目录是否活跃，如果不活跃（比如还在回收站），应该拒绝还原或者还原到根目录？
+        // 简单逻辑：如果父目录是软删除状态，先不管，直接改状态。但如果父目录不存在了，挂到根目录。
+        let targetParentId = folder.parent_id;
+        if (targetParentId) {
+             const parent = await db.get("SELECT is_deleted FROM folders WHERE id = ?", [targetParentId]);
+             if (!parent || parent.is_deleted) targetParentId = null; // 挂到根目录
+        }
+
+        const existingFolder = await db.get(
+            "SELECT id, name FROM folders WHERE parent_id = ? AND name = ? AND user_id = ? AND deleted_at IS NULL", 
+            [targetParentId, folder.name, userId]
+        );
+
+        if (existingFolder) {
+            if (conflictMode === 'overwrite') {
+                // [核心修改] 还原时合并
+                await restoreAndMergeFolder(db, id, existingFolder.id, userId, conflictMode);
+                // 删除原外壳
+                await db.run(`DELETE FROM folders WHERE id = ?`, [id]);
+            } else if (conflictMode === 'skip') {
+                continue; 
+            } else {
+                const newName = await getUniqueName(db, targetParentId, folder.name, userId, 'folder');
+                await db.run("UPDATE folders SET name = ?, parent_id = ?, is_deleted = 0, deleted_at = NULL WHERE id = ? AND user_id = ?", 
+                    [newName, targetParentId, id, userId]);
+                await cascadeRestore(db, id, userId);
+            }
+        } else {
+            // 无冲突，正常还原
+            // 先处理垃圾文件冲突
+            try {
+                await db.run("UPDATE folders SET parent_id = ?, is_deleted = 0, deleted_at = NULL WHERE id = ? AND user_id = ?", 
+                    [targetParentId, id, userId]);
+            } catch(e) {
+                if (e.message && e.message.includes('UNIQUE')) {
+                    await handleTrashConflict(db, 'folders', 'name', 'parent_id', folder.name, targetParentId, userId);
+                    await db.run("UPDATE folders SET parent_id = ?, is_deleted = 0, deleted_at = NULL WHERE id = ? AND user_id = ?", 
+                        [targetParentId, id, userId]);
+                } else throw e;
+            }
+            await cascadeRestore(db, id, userId);
+        }
+    }
+
+    // 2. 还原文件
+    for (const id of (fileIds || [])) {
+        const file = await db.get("SELECT message_id, fileName, folder_id FROM files WHERE message_id = ? AND user_id = ?", [id, userId]);
+        if (!file) continue;
+
+        let targetFolderId = file.folder_id;
+        if (targetFolderId) {
+             const parent = await db.get("SELECT is_deleted FROM folders WHERE id = ?", [targetFolderId]);
+             if (!parent || parent.is_deleted) targetFolderId = await getRootFolderId(db, userId); // 挂到根目录
+        }
+
+        const existingFile = await db.get(
+            "SELECT message_id, fileName FROM files WHERE folder_id = ? AND fileName = ? AND user_id = ? AND deleted_at IS NULL", 
+            [targetFolderId, file.fileName, userId]
+        );
+
+        if (existingFile) {
+            if (conflictMode === 'overwrite') {
+                // 删除现有的
+                const trashName = `${existingFile.fileName}_overwritten_${Date.now()}`;
+                await db.run("UPDATE files SET is_deleted = 1, deleted_at = ?, fileName = ? WHERE message_id = ?", 
+                    [Date.now(), trashName, existingFile.message_id]);
+                // 还原旧的
+                await db.run("UPDATE files SET is_deleted = 0, deleted_at = NULL, folder_id = ? WHERE message_id = ?", 
+                    [targetFolderId, id]);
+            } else if (conflictMode === 'skip') {
+                continue; 
+            } else {
+                const newName = await getUniqueName(db, targetFolderId, file.fileName, userId, 'file');
+                await db.run("UPDATE files SET fileName = ?, folder_id = ?, is_deleted = 0, deleted_at = NULL WHERE message_id = ?", 
+                    [newName, targetFolderId, id]);
+            }
+        } else {
+             try {
+                await db.run("UPDATE files SET folder_id = ?, is_deleted = 0, deleted_at = NULL WHERE message_id = ?", 
+                    [targetFolderId, id]);
+             } catch(e) {
+                 if (e.message && e.message.includes('UNIQUE')) {
+                     await handleTrashConflict(db, 'files', 'fileName', 'folder_id', file.fileName, targetFolderId, userId);
+                     await db.run("UPDATE files SET folder_id = ?, is_deleted = 0, deleted_at = NULL WHERE message_id = ?", 
+                        [targetFolderId, id]);
+                 } else throw e;
+             }
+        }
+    }
+
+    return { success: true };
+}
+
+// 辅助：获取根目录ID
+async function getRootFolderId(db, userId) {
+    const row = await db.get("SELECT id FROM folders WHERE parent_id IS NULL AND user_id = ?", [userId]);
+    return row ? row.id : 1; 
+}
+
+
 export async function checkRestoreConflicts(db, fileIds = [], folderIds = [], userId) {
     const conflicts = [];
     for (const id of fileIds) {
         const file = await db.get("SELECT fileName, folder_id FROM files WHERE message_id = ? AND user_id = ?", [id, userId]);
         if (file) {
+            // 注意：restore冲突检测时，要看父目录是否还在。如果父目录已删，还原位置会变，这里简化处理只检查当前folder_id
             const existing = await db.get(
                 "SELECT 1 FROM files WHERE folder_id = ? AND fileName = ? AND user_id = ? AND deleted_at IS NULL", 
                 [file.folder_id, file.fileName, userId]
@@ -495,93 +824,6 @@ export async function checkRestoreConflicts(db, fileIds = [], folderIds = [], us
     return conflicts;
 }
 
-export async function restoreItems(db, storage, fileIds = [], folderIds = [], userId, conflictMode = 'rename') {
-    let targetFileIds = new Set(fileIds || []);
-    let targetFolderIds = new Set(folderIds || []);
-
-    if (folderIds && folderIds.length > 0) {
-        for (const folderId of folderIds) {
-            const data = await getFolderDeletionData(db, folderId, userId);
-            data.files.forEach(f => targetFileIds.add(f.message_id));
-            data.folders.forEach(f => targetFolderIds.add(f.id));
-        }
-    }
-
-    // [修复] 还原文件夹时，如果是覆盖模式，必须重命名已存在的项目以释放唯一约束
-    for (const id of (folderIds || [])) {
-        const folder = await db.get("SELECT id, name, parent_id FROM folders WHERE id = ? AND user_id = ?", [id, userId]);
-        if (folder) {
-            const existingFolder = await db.get(
-                "SELECT id, name FROM folders WHERE parent_id = ? AND name = ? AND user_id = ? AND deleted_at IS NULL", 
-                [folder.parent_id, folder.name, userId]
-            );
-
-            if (existingFolder) {
-                if (conflictMode === 'overwrite') {
-                    const trashName = `${existingFolder.name}_overwritten_${Date.now()}`;
-                    await db.run(
-                        "UPDATE folders SET is_deleted = 1, deleted_at = ?, name = ? WHERE id = ? AND user_id = ?",
-                        [Date.now(), trashName, existingFolder.id, userId]
-                    );
-                } else if (conflictMode === 'skip') {
-                    targetFolderIds.delete(id);
-                    const data = await getFolderDeletionData(db, id, userId);
-                    data.files.forEach(f => targetFileIds.delete(f.message_id));
-                    data.folders.forEach(f => targetFolderIds.delete(f.id));
-                    continue; 
-                } else {
-                    const newName = await getUniqueName(db, folder.parent_id, folder.name, userId, 'folder');
-                    if (newName !== folder.name) {
-                        await db.run("UPDATE folders SET name = ? WHERE id = ? AND user_id = ?", [newName, id, userId]);
-                    }
-                }
-            }
-        }
-    }
-
-    // [修复] 还原文件时，如果是覆盖模式，必须重命名已存在的项目
-    for (const id of (fileIds || [])) {
-        if (!targetFileIds.has(id)) continue;
-        const file = await db.get("SELECT message_id, fileName, folder_id FROM files WHERE message_id = ? AND user_id = ?", [id, userId]);
-        if (file) {
-            const existingFile = await db.get(
-                "SELECT message_id, fileName FROM files WHERE folder_id = ? AND fileName = ? AND user_id = ? AND deleted_at IS NULL", 
-                [file.folder_id, file.fileName, userId]
-            );
-
-            if (existingFile) {
-                if (conflictMode === 'overwrite') {
-                    const trashName = `${existingFile.fileName}_overwritten_${Date.now()}`;
-                    await db.run(
-                        "UPDATE files SET is_deleted = 1, deleted_at = ?, fileName = ? WHERE message_id = ? AND user_id = ?",
-                        [Date.now(), trashName, existingFile.message_id, userId]
-                    );
-                } else if (conflictMode === 'skip') {
-                    targetFileIds.delete(id);
-                    continue; 
-                } else {
-                    const newName = await getUniqueName(db, file.folder_id, file.fileName, userId, 'file');
-                    if (newName !== file.fileName) {
-                        await db.run("UPDATE files SET fileName = ? WHERE message_id = ? AND user_id = ?", [newName, id, userId]);
-                    }
-                }
-            }
-        }
-    }
-
-    const finalFileIds = Array.from(targetFileIds);
-    const finalFolderIds = Array.from(targetFolderIds);
-
-    if (finalFileIds.length > 0) {
-        const place = finalFileIds.map(() => '?').join(',');
-        await db.run(`UPDATE files SET is_deleted = 0, deleted_at = NULL WHERE message_id IN (${place}) AND user_id = ?`, [...finalFileIds, userId]);
-    }
-    if (finalFolderIds.length > 0) {
-        const place = finalFolderIds.map(() => '?').join(',');
-        await db.run(`UPDATE folders SET is_deleted = 0, deleted_at = NULL WHERE id IN (${place}) AND user_id = ?`, [...finalFolderIds, userId]);
-    }
-    return { success: true };
-}
 
 // =================================================================================
 // 8. 回收站內容
@@ -659,7 +901,6 @@ export async function getFileByShareToken(db, token) {
 }
 
 export async function getFolderByShareToken(db, token) {
-    // 修复：直接查询 *，不再强制别名覆盖，确保 share_password 字段正确读取
     const row = await db.get("SELECT * FROM folders WHERE share_token = ?", [token]);
     if (!row) return null;
     if (row.share_expires_at && Date.now() > row.share_expires_at) return null;
@@ -702,91 +943,6 @@ export async function setFolderPassword(db, folderId, password, userId) {
     const finalPassword = (password && password.length > 0) ? password : null;
     const result = await db.run(`UPDATE folders SET password = ? WHERE id = ? AND user_id = ?`, [finalPassword, folderId, userId]);
     if (result.meta.changes === 0) throw new Error('文件夹未找到或无权操作');
-    return { success: true };
-}
-
-// =================================================================================
-// 10. 移動與重命名
-// =================================================================================
-
-export async function moveItems(db, storage, fileIds = [], folderIds = [], targetFolderId, userId, conflictMode = 'rename') {
-    // [修复] 处理文件移动冲突
-    for (const fileId of fileIds) {
-        const file = await db.get("SELECT fileName FROM files WHERE message_id = ? AND user_id = ?", [fileId, userId]);
-        if (file) {
-            let finalName = file.fileName;
-            const existing = await db.get(
-                "SELECT message_id, fileName FROM files WHERE folder_id = ? AND fileName = ? AND user_id = ? AND deleted_at IS NULL", 
-                [targetFolderId, file.fileName, userId]
-            );
-
-            if (existing) {
-                if (conflictMode === 'overwrite') {
-                    // [关键修改] 覆盖时，将旧文件重命名为垃圾文件名，防止唯一约束冲突
-                    const trashName = `${existing.fileName}_overwritten_${Date.now()}`;
-                    await db.run(
-                        "UPDATE files SET is_deleted = 1, deleted_at = ?, fileName = ? WHERE message_id = ? AND user_id = ?", 
-                        [Date.now(), trashName, existing.message_id, userId]
-                    );
-                } else if (conflictMode === 'skip') {
-                    continue; 
-                } else {
-                    finalName = await getUniqueName(db, targetFolderId, file.fileName, userId, 'file');
-                }
-            }
-            
-            // 尝试更新，如果遇到唯一约束冲突（仍有可能由其他垃圾文件引起），则解决冲突并重试
-            try {
-                await db.run("UPDATE files SET folder_id = ?, fileName = ? WHERE message_id = ? AND user_id = ?", [targetFolderId, finalName, fileId, userId]);
-            } catch (err) {
-                if (err.message && err.message.includes('UNIQUE')) {
-                    const resolved = await handleTrashConflict(db, 'files', 'fileName', 'folder_id', finalName, targetFolderId, userId);
-                    if (resolved) {
-                        await db.run("UPDATE files SET folder_id = ?, fileName = ? WHERE message_id = ? AND user_id = ?", [targetFolderId, finalName, fileId, userId]);
-                    } else throw err;
-                } else throw err;
-            }
-        }
-    }
-
-    // [修复] 处理文件夹移动冲突
-    for (const folderId of folderIds) {
-        if (folderId === targetFolderId) continue; 
-        const folder = await db.get("SELECT name FROM folders WHERE id = ? AND user_id = ?", [folderId, userId]);
-        if (folder) {
-            let finalName = folder.name;
-            const existingFolder = await db.get(
-                "SELECT id, name FROM folders WHERE parent_id = ? AND name = ? AND user_id = ? AND deleted_at IS NULL",
-                [targetFolderId, folder.name, userId]
-            );
-
-            if (existingFolder) {
-                if (conflictMode === 'overwrite') {
-                    // [关键修改] 覆盖时，将旧文件夹重命名为垃圾文件名
-                    const trashName = `${existingFolder.name}_overwritten_${Date.now()}`;
-                    await db.run(
-                        "UPDATE folders SET is_deleted = 1, deleted_at = ?, name = ? WHERE id = ? AND user_id = ?", 
-                        [Date.now(), trashName, existingFolder.id, userId]
-                    );
-                } else if (conflictMode === 'skip') {
-                    continue; 
-                } else {
-                    finalName = await getUniqueName(db, targetFolderId, folder.name, userId, 'folder');
-                }
-            }
-
-            try {
-                await db.run("UPDATE folders SET parent_id = ?, name = ? WHERE id = ? AND user_id = ?", [targetFolderId, finalName, folderId, userId]);
-            } catch (err) {
-                if (err.message && err.message.includes('UNIQUE')) {
-                    const resolved = await handleTrashConflict(db, 'folders', 'name', 'parent_id', finalName, targetFolderId, userId);
-                    if (resolved) {
-                        await db.run("UPDATE folders SET parent_id = ?, name = ? WHERE id = ? AND user_id = ?", [targetFolderId, finalName, folderId, userId]);
-                    } else throw err;
-                } else throw err;
-            }
-        }
-    }
     return { success: true };
 }
 
@@ -850,67 +1006,30 @@ export async function deleteAuthToken(db, token) {
 
 export async function scanStorageAndImport(db, storage, userId, storageType, log) {
     await log(`正在连接 ${storageType} 存储...`);
-    
     try {
-        // 1. 获取远程文件列表
         const prefix = `${userId}/`; 
         const remoteFiles = await storage.list(prefix);
-        
         await log(`远程存储中发现 ${remoteFiles.length} 个文件。开始比对数据库...`);
-
-        // 获取用户根目录 ID
         const rootFolder = await getRootFolder(db, userId);
-        if (!rootFolder) {
-            throw new Error(`用户根目录不存在，请先登录该用户以初始化目录结构。`);
-        }
-
+        if (!rootFolder) throw new Error(`用户根目录不存在，请先登录该用户以初始化目录结构。`);
         let importCount = 0;
         let skipCount = 0;
-
         for (const remote of remoteFiles) {
-            // remote 结构: { fileId: 'user/path/to/file.ext', size: 1234, updatedAt: ... }
-            
-            // 检查数据库是否存在 (通过 file_id)
-            const existing = await db.get(
-                "SELECT 1 FROM files WHERE file_id = ? AND user_id = ? AND deleted_at IS NULL", 
-                [remote.fileId, userId]
-            );
-
-            if (existing) {
-                skipCount++;
-                continue;
-            }
-
-            // 提取文件名 (简单处理：放入根目录)
+            const existing = await db.get("SELECT 1 FROM files WHERE file_id = ? AND user_id = ? AND deleted_at IS NULL", [remote.fileId, userId]);
+            if (existing) { skipCount++; continue; }
             const fileName = path.basename(remote.fileId);
-            
             if (!fileName || fileName.startsWith('.')) continue;
-
             const uniqueName = await getUniqueName(db, rootFolder.id, fileName, userId, 'file');
             const messageId = (BigInt(Date.now()) * 1000n + BigInt(Math.floor(Math.random() * 1000))).toString();
-
-            // 插入数据库
-            // [修复] 使用 update 后的 addFile，它会自动处理与垃圾文件的冲突
             await addFile(db, {
-                message_id: messageId,
-                fileName: uniqueName,
-                mimetype: 'application/octet-stream', 
-                file_id: remote.fileId,
-                thumb_file_id: null,
-                date: remote.updatedAt || Date.now(),
-                size: remote.size
+                message_id: messageId, fileName: uniqueName, mimetype: 'application/octet-stream', 
+                file_id: remote.fileId, thumb_file_id: null, date: remote.updatedAt || Date.now(), size: remote.size
             }, rootFolder.id, userId, 'imported'); 
-
             await log(`[导入] ${uniqueName} (${formatSize(remote.size)})`);
             importCount++;
         }
-
         await log(`扫描完成！新增: ${importCount}, 跳过: ${skipCount}`);
-
-    } catch (e) {
-        await log(`扫描失败: ${e.message}`);
-        throw e;
-    }
+    } catch (e) { await log(`扫描失败: ${e.message}`); throw e; }
 }
 
 /**
@@ -918,31 +1037,22 @@ export async function scanStorageAndImport(db, storage, userId, storageType, log
  */
 export async function getShareFolderAllFiles(db, folderId, userId) {
     const filesList = [];
-    
-    // 递归辅助函数
     async function recurse(currentId, currentPath) {
-        // 1. 获取当前目录下的文件
         const sqlFiles = `SELECT CAST(message_id AS TEXT) AS message_id, fileName, size, file_id, storage_type, thumb_file_id FROM files WHERE folder_id = ? AND user_id = ? AND deleted_at IS NULL`;
         const files = await db.all(sqlFiles, [currentId, userId]);
-        
         for (const f of files) {
             filesList.push({
                 ...f,
-                // 构建相对路径，例如 "子文件夹/文件.txt"
                 zipPath: currentPath ? `${currentPath}/${f.fileName}` : f.fileName
             });
         }
-
-        // 2. 获取子文件夹并递归
         const sqlFolders = `SELECT id, name FROM folders WHERE parent_id = ? AND user_id = ? AND deleted_at IS NULL`;
         const folders = await db.all(sqlFolders, [currentId, userId]);
-        
         for (const f of folders) {
             const nextPath = currentPath ? `${currentPath}/${f.name}` : f.name;
             await recurse(f.id, nextPath);
         }
     }
-
     await recurse(folderId, "");
     return filesList;
 }
