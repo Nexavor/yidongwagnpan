@@ -240,12 +240,13 @@ function renderFile(data){
         });
     }
 
+    // [修改] 增加了 primary-btn 类，防止 hover 变白
     app.innerHTML=\`<div style="text-align:center;">
         <div class="file-icon"><i class="fas fa-\${isImg?'image':(isVideo?'video':(isText?'file-alt':'file'))}"></i></div>
         <h2>\${escapeHtml(data.name)}</h2>
         <p style="color:#666;">大小: \${formatSize(data.size)} <span style="margin:0 10px;">|</span> 时间: \${new Date(data.date).toLocaleString()}</p>
         \${preview}
-        <div style="margin-top:30px;"><a href="\${data.downloadUrl}" class="btn"><i class="fas fa-download"></i> 下载文件</a></div>
+        <div style="margin-top:30px;"><a href="\${data.downloadUrl}" class="btn primary-btn"><i class="fas fa-download"></i> 下载文件</a></div>
     </div>\`
 }
 
