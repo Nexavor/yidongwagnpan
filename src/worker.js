@@ -6,7 +6,6 @@ import ConfigManager from './config.js';
 import * as data from './data.js';
 import { initStorage } from './storage/index.js';
 import { initCrypto, encrypt, decrypt } from './crypto.js';
-import { createZipStream } from './zip.js'; // [新增] 引入 ZIP 流式处理模块
 
 const app = new Hono();
 
@@ -14,7 +13,7 @@ const app = new Hono();
 // [配置] 部署版本控制
 // 修改此版本号(或时间戳)并重新部署，会触发且仅触发一次新的 WebDAV 推送
 // =================================================================================
-const DEPLOY_VERSION = 'v1.0.1_20241210'; // 建议每次部署修改此处
+const DEPLOY_VERSION = 'v1.0.0_20241209'; // 建议每次部署修改此处，例如改为当前日期时间
 
 // =================================================================================
 // 0. 辅助函数：处理 Pages 静态资源
@@ -172,7 +171,7 @@ app.use('*', async (c, next) => {
 });
 
 // =================================================================================
-// 4. 分享页面路由
+// 4. 分享页面路由 (保持原样)
 // =================================================================================
 const SHARE_HTML = `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -249,15 +248,8 @@ function renderFile(data){
     </div>\`
 }
 
-// [修改] renderFolder 增加了下载按钮
 function renderFolder(data){
-    let html=\`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
-        <h3 style="margin:0;">\${escapeHtml(data.name)} (文件夹)</h3>
-        <a href="/share/download-folder/\${token}" target="_blank" class="btn" style="font-size:14px;padding:6px 12px;background:#28a745;">
-            <i class="fas fa-download"></i> 打包下载
-        </a>
-    </div>
-    <div class="list">\`;
+    let html=\`<h3>\${escapeHtml(data.name)} (文件夹)</h3><div class="list">\`;
     if(data.folders)data.folders.forEach(f=>{html+=\`<div class="list-item"><i class="fas fa-folder" style="color:#fbc02d;"></i> <span>\${escapeHtml(f.name)}</span></div>\`});
     if(data.files)data.files.forEach(f=>{html+=\`<div class="list-item"><a href="/share/download/\${token}/\${f.id}" target="_blank"><i class="fas fa-file" style="color:#555;"></i> <span>\${escapeHtml(f.name||f.fileName)}</span> <span style="margin-left:auto;font-size:12px;color:#999;">\${formatSize(f.size)}</span></a></div>\`});
     html+='</div>';app.innerHTML=html
@@ -336,7 +328,7 @@ const adminMiddleware = async (c, next) => {
 };
 
 // =================================================================================
-// 6. 分享相关 API
+// 6. 分享相关 API (未变动)
 // =================================================================================
 app.get('/api/public/share/:token', async (c) => {
     const token = c.req.param('token');
@@ -421,48 +413,6 @@ app.get('/share/download/:token/:fileId', async (c) => {
         h.set('Content-Type', file.mimetype || contentType || 'application/octet-stream');
         return new Response(stream, { headers: h });
     } catch(e) { return c.text(e.message, 500); }
-});
-
-// [新增] 文件夹打包下载路由
-app.get('/share/download-folder/:token', async (c) => {
-    const token = c.req.param('token');
-    const db = c.get('db');
-    
-    // 获取文件夹信息
-    const folder = await data.getFolderByShareToken(db, token);
-    if (!folder) return c.text('Shared folder not found or expired', 404);
-
-    // 验证密码
-    if (folder.share_password) {
-        const authCookie = getCookie(c, `share_auth_${token}`);
-        if (authCookie !== 'valid') return c.text('Unauthorized: Password required', 401);
-    }
-
-    const storage = c.get('storage');
-    if (!storage) return c.text('Storage not configured', 500);
-
-    try {
-        // 1. 获取所有文件（递归）
-        const files = await data.getShareFolderAllFiles(db, folder.id, folder.user_id);
-        
-        if (files.length === 0) return c.text('Folder is empty', 404);
-
-        // 2. 创建 ZIP 流
-        const zipStream = createZipStream(files, storage, folder.user_id);
-
-        // 3. 返回流式响应
-        const encodedName = encodeURIComponent(folder.name + '.zip');
-        return new Response(zipStream, {
-            headers: {
-                'Content-Type': 'application/zip',
-                'Content-Disposition': `attachment; filename*=UTF-8''${encodedName}`
-            }
-        });
-
-    } catch (e) {
-        console.error('Zip Error:', e);
-        return c.text('Server Error: ' + e.message, 500);
-    }
 });
 
 // =================================================================================

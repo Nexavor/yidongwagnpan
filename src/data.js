@@ -18,8 +18,6 @@ export async function getUniqueName(db, folderId, originalName, userId, type) {
     const col = type === 'file' ? 'fileName' : 'name';
     const parentCol = type === 'file' ? 'folder_id' : 'parent_id';
     
-    // 仅检查活跃文件。如果存在已删除的同名文件，我们允许返回原名，
-    // 但后续写入操作必须处理与“已删除文件”的冲突（将已删除文件重命名）。
     const exists = await db.get(
         `SELECT 1 as exists_flag FROM ${table} WHERE ${col} = ? AND ${parentCol} = ? AND user_id = ? AND deleted_at IS NULL`, 
         [originalName, folderId, userId]
@@ -56,24 +54,6 @@ function formatSize(bytes) {
     const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-}
-
-// 内部辅助：处理唯一约束冲突（给占位的垃圾文件改名）
-async function handleTrashConflict(db, table, nameCol, parentCol, nameVal, parentVal, userId) {
-    const row = await db.get(
-        `SELECT id, message_id FROM ${table} WHERE ${nameCol} = ? AND ${parentCol} = ? AND user_id = ? AND deleted_at IS NOT NULL`,
-        [nameVal, parentVal, userId]
-    );
-    
-    if (row) {
-        const trashName = `${nameVal}_deleted_${Date.now()}_${Math.floor(Math.random()*1000)}`;
-        const idCol = table === 'files' ? 'message_id' : 'id';
-        const idVal = table === 'files' ? row.message_id : row.id;
-        // 将挡路的垃圾文件重命名
-        await db.run(`UPDATE ${table} SET ${nameCol} = ? WHERE ${idCol} = ?`, [trashName, idVal]);
-        return true; // 解决了冲突
-    }
-    return false; // 没找到冲突源
 }
 
 // =================================================================================
@@ -124,7 +104,10 @@ export async function getUserQuota(db, userId) {
     const user = await db.get("SELECT max_storage_bytes FROM users WHERE id = ?", [userId]);
     const usage = await db.get("SELECT SUM(size) as total_size FROM files WHERE user_id = ? AND deleted_at IS NULL", [userId]);
     
-    let maxStorage = 1073741824; 
+    // [修复] 这里的逻辑修改了：
+    // 只有当 max_storage_bytes 确实为 null 或 undefined 时才使用默认值
+    // 如果是 0，则保留 0（代表无限）
+    let maxStorage = 1073741824; // 默认 1GB
     if (user && user.max_storage_bytes !== null && user.max_storage_bytes !== undefined) {
         maxStorage = user.max_storage_bytes;
     }
@@ -152,6 +135,7 @@ export async function listAllUsersWithQuota(db) {
     const usageMap = new Map(usageData.map(row => [row.user_id, row.total_size]));
     
     return users.map(user => {
+        // [修复] 同样在这里修复显示逻辑，防止管理员列表中显示错误
         let maxBytes = 1073741824;
         if (user.max_storage_bytes !== null && user.max_storage_bytes !== undefined) {
             maxBytes = user.max_storage_bytes;
@@ -181,20 +165,8 @@ export async function addFile(db, fileData, folderId = 1, userId, storageType) {
     const { message_id, fileName, mimetype, file_id, thumb_file_id, date, size } = fileData;
     const sql = `INSERT INTO files (message_id, fileName, mimetype, file_id, thumb_file_id, date, size, folder_id, user_id, storage_type, is_deleted)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`;
-    
-    try {
-        const result = await db.run(sql, [message_id, fileName, mimetype, file_id, thumb_file_id, date, size, folderId, userId, storageType]);
-        return { success: true, id: result.meta.last_row_id || 0, fileId: message_id };
-    } catch (err) {
-        if (err.message && err.message.includes('UNIQUE')) {
-            const resolved = await handleTrashConflict(db, 'files', 'fileName', 'folder_id', fileName, folderId, userId);
-            if (resolved) {
-                const retryResult = await db.run(sql, [message_id, fileName, mimetype, file_id, thumb_file_id, date, size, folderId, userId, storageType]);
-                return { success: true, id: retryResult.meta.last_row_id || 0, fileId: message_id };
-            }
-        }
-        throw err;
-    }
+    const result = await db.run(sql, [message_id, fileName, mimetype, file_id, thumb_file_id, date, size, folderId, userId, storageType]);
+    return { success: true, id: result.meta.last_row_id || 0, fileId: message_id };
 }
 
 export async function updateFile(db, fileId, updates, userId) {
@@ -250,9 +222,11 @@ export async function createFolder(db, name, parentId, userId) {
         return { success: true, id: newId };
     } catch (err) {
         if (err.message && err.message.includes('UNIQUE')) {
+            let row;
             const whereClause = parentId === null ? "parent_id IS NULL" : "parent_id = ?";
             const params = parentId === null ? [name, userId] : [name, parentId, userId];
-            const row = await db.get(`SELECT id, deleted_at FROM folders WHERE name = ? AND ${whereClause} AND user_id = ?`, params); 
+            
+            row = await db.get(`SELECT id, deleted_at FROM folders WHERE name = ? AND ${whereClause} AND user_id = ?`, params); 
             
             if (row) {
                 if (row.deleted_at !== null) {
@@ -507,22 +481,17 @@ export async function restoreItems(db, storage, fileIds = [], folderIds = [], us
         }
     }
 
-    // [修复] 还原文件夹时，如果是覆盖模式，必须重命名已存在的项目以释放唯一约束
     for (const id of (folderIds || [])) {
         const folder = await db.get("SELECT id, name, parent_id FROM folders WHERE id = ? AND user_id = ?", [id, userId]);
         if (folder) {
             const existingFolder = await db.get(
-                "SELECT id, name FROM folders WHERE parent_id = ? AND name = ? AND user_id = ? AND deleted_at IS NULL", 
+                "SELECT id FROM folders WHERE parent_id = ? AND name = ? AND user_id = ? AND deleted_at IS NULL", 
                 [folder.parent_id, folder.name, userId]
             );
 
             if (existingFolder) {
                 if (conflictMode === 'overwrite') {
-                    const trashName = `${existingFolder.name}_overwritten_${Date.now()}`;
-                    await db.run(
-                        "UPDATE folders SET is_deleted = 1, deleted_at = ?, name = ? WHERE id = ? AND user_id = ?",
-                        [Date.now(), trashName, existingFolder.id, userId]
-                    );
+                    await softDeleteItems(db, [], [existingFolder.id], userId);
                 } else if (conflictMode === 'skip') {
                     targetFolderIds.delete(id);
                     const data = await getFolderDeletionData(db, id, userId);
@@ -539,23 +508,18 @@ export async function restoreItems(db, storage, fileIds = [], folderIds = [], us
         }
     }
 
-    // [修复] 还原文件时，如果是覆盖模式，必须重命名已存在的项目
     for (const id of (fileIds || [])) {
         if (!targetFileIds.has(id)) continue;
         const file = await db.get("SELECT message_id, fileName, folder_id FROM files WHERE message_id = ? AND user_id = ?", [id, userId]);
         if (file) {
             const existingFile = await db.get(
-                "SELECT message_id, fileName FROM files WHERE folder_id = ? AND fileName = ? AND user_id = ? AND deleted_at IS NULL", 
+                "SELECT message_id FROM files WHERE folder_id = ? AND fileName = ? AND user_id = ? AND deleted_at IS NULL", 
                 [file.folder_id, file.fileName, userId]
             );
 
             if (existingFile) {
                 if (conflictMode === 'overwrite') {
-                    const trashName = `${existingFile.fileName}_overwritten_${Date.now()}`;
-                    await db.run(
-                        "UPDATE files SET is_deleted = 1, deleted_at = ?, fileName = ? WHERE message_id = ? AND user_id = ?",
-                        [Date.now(), trashName, existingFile.message_id, userId]
-                    );
+                    await db.run("UPDATE files SET is_deleted = 1, deleted_at = ? WHERE message_id = ? AND user_id = ?", [Date.now(), existingFile.message_id, userId]);
                 } else if (conflictMode === 'skip') {
                     targetFileIds.delete(id);
                     continue; 
@@ -710,121 +674,60 @@ export async function setFolderPassword(db, folderId, password, userId) {
 // =================================================================================
 
 export async function moveItems(db, storage, fileIds = [], folderIds = [], targetFolderId, userId, conflictMode = 'rename') {
-    // [修复] 处理文件移动冲突
     for (const fileId of fileIds) {
         const file = await db.get("SELECT fileName FROM files WHERE message_id = ? AND user_id = ?", [fileId, userId]);
         if (file) {
             let finalName = file.fileName;
             const existing = await db.get(
-                "SELECT message_id, fileName FROM files WHERE folder_id = ? AND fileName = ? AND user_id = ? AND deleted_at IS NULL", 
+                "SELECT message_id FROM files WHERE folder_id = ? AND fileName = ? AND user_id = ? AND deleted_at IS NULL", 
                 [targetFolderId, file.fileName, userId]
             );
 
             if (existing) {
                 if (conflictMode === 'overwrite') {
-                    // [关键修改] 覆盖时，将旧文件重命名为垃圾文件名，防止唯一约束冲突
-                    const trashName = `${existing.fileName}_overwritten_${Date.now()}`;
-                    await db.run(
-                        "UPDATE files SET is_deleted = 1, deleted_at = ?, fileName = ? WHERE message_id = ? AND user_id = ?", 
-                        [Date.now(), trashName, existing.message_id, userId]
-                    );
+                    await db.run("UPDATE files SET is_deleted = 1, deleted_at = ? WHERE message_id = ? AND user_id = ?", [Date.now(), existing.message_id, userId]);
                 } else if (conflictMode === 'skip') {
                     continue; 
                 } else {
                     finalName = await getUniqueName(db, targetFolderId, file.fileName, userId, 'file');
                 }
             }
-            
-            // 尝试更新，如果遇到唯一约束冲突（仍有可能由其他垃圾文件引起），则解决冲突并重试
-            try {
-                await db.run("UPDATE files SET folder_id = ?, fileName = ? WHERE message_id = ? AND user_id = ?", [targetFolderId, finalName, fileId, userId]);
-            } catch (err) {
-                if (err.message && err.message.includes('UNIQUE')) {
-                    const resolved = await handleTrashConflict(db, 'files', 'fileName', 'folder_id', finalName, targetFolderId, userId);
-                    if (resolved) {
-                        await db.run("UPDATE files SET folder_id = ?, fileName = ? WHERE message_id = ? AND user_id = ?", [targetFolderId, finalName, fileId, userId]);
-                    } else throw err;
-                } else throw err;
-            }
+            await db.run("UPDATE files SET folder_id = ?, fileName = ? WHERE message_id = ? AND user_id = ?", [targetFolderId, finalName, fileId, userId]);
         }
     }
 
-    // [修复] 处理文件夹移动冲突
     for (const folderId of folderIds) {
         if (folderId === targetFolderId) continue; 
         const folder = await db.get("SELECT name FROM folders WHERE id = ? AND user_id = ?", [folderId, userId]);
         if (folder) {
             let finalName = folder.name;
             const existingFolder = await db.get(
-                "SELECT id, name FROM folders WHERE parent_id = ? AND name = ? AND user_id = ? AND deleted_at IS NULL",
+                "SELECT id FROM folders WHERE parent_id = ? AND name = ? AND user_id = ? AND deleted_at IS NULL",
                 [targetFolderId, folder.name, userId]
             );
 
             if (existingFolder) {
                 if (conflictMode === 'overwrite') {
-                    // [关键修改] 覆盖时，将旧文件夹重命名为垃圾文件名
-                    const trashName = `${existingFolder.name}_overwritten_${Date.now()}`;
-                    await db.run(
-                        "UPDATE folders SET is_deleted = 1, deleted_at = ?, name = ? WHERE id = ? AND user_id = ?", 
-                        [Date.now(), trashName, existingFolder.id, userId]
-                    );
+                    await softDeleteItems(db, [], [existingFolder.id], userId);
                 } else if (conflictMode === 'skip') {
                     continue; 
                 } else {
                     finalName = await getUniqueName(db, targetFolderId, folder.name, userId, 'folder');
                 }
             }
-
-            try {
-                await db.run("UPDATE folders SET parent_id = ?, name = ? WHERE id = ? AND user_id = ?", [targetFolderId, finalName, folderId, userId]);
-            } catch (err) {
-                if (err.message && err.message.includes('UNIQUE')) {
-                    const resolved = await handleTrashConflict(db, 'folders', 'name', 'parent_id', finalName, targetFolderId, userId);
-                    if (resolved) {
-                        await db.run("UPDATE folders SET parent_id = ?, name = ? WHERE id = ? AND user_id = ?", [targetFolderId, finalName, folderId, userId]);
-                    } else throw err;
-                } else throw err;
-            }
+            await db.run("UPDATE folders SET parent_id = ?, name = ? WHERE id = ? AND user_id = ?", [targetFolderId, finalName, folderId, userId]);
         }
     }
     return { success: true };
 }
 
 export async function renameFile(db, storage, messageId, newFileName, userId) {
-    const file = await db.get("SELECT folder_id FROM files WHERE message_id = ? AND user_id = ?", [messageId, userId]);
-    if (!file) throw new Error('File not found');
-    
-    try {
-        await db.run(`UPDATE files SET fileName = ? WHERE message_id = ? AND user_id = ?`, [newFileName, messageId, userId]);
-    } catch (err) {
-        if (err.message && err.message.includes('UNIQUE')) {
-             const resolved = await handleTrashConflict(db, 'files', 'fileName', 'folder_id', newFileName, file.folder_id, userId);
-             if (resolved) {
-                 await db.run(`UPDATE files SET fileName = ? WHERE message_id = ? AND user_id = ?`, [newFileName, messageId, userId]);
-                 return { success: true };
-             }
-        }
-        throw err;
-    }
+    const result = await db.run(`UPDATE files SET fileName = ? WHERE message_id = ? AND user_id = ?`, [newFileName, messageId, userId]);
     return { success: true };
 }
 
 export async function renameFolder(db, storage, folderId, newFolderName, userId) {
-    const folder = await db.get("SELECT parent_id FROM folders WHERE id = ? AND user_id = ?", [folderId, userId]);
-    if (!folder) throw new Error('Folder not found');
-
-    try {
-        await db.run(`UPDATE folders SET name = ? WHERE id = ? AND user_id = ?`, [newFolderName, folderId, userId]);
-    } catch (err) {
-        if (err.message && err.message.includes('UNIQUE')) {
-            const resolved = await handleTrashConflict(db, 'folders', 'name', 'parent_id', newFolderName, folder.parent_id, userId);
-            if (resolved) {
-                await db.run(`UPDATE folders SET name = ? WHERE id = ? AND user_id = ?`, [newFolderName, folderId, userId]);
-                return { success: true };
-            }
-        }
-        throw err;
-    }
+    const result = await db.run(`UPDATE folders SET name = ? WHERE id = ? AND user_id = ?`, [newFolderName, folderId, userId]);
     return { success: true };
 }
 
@@ -890,7 +793,6 @@ export async function scanStorageAndImport(db, storage, userId, storageType, log
             const messageId = (BigInt(Date.now()) * 1000n + BigInt(Math.floor(Math.random() * 1000))).toString();
 
             // 插入数据库
-            // [修复] 使用 update 后的 addFile，它会自动处理与垃圾文件的冲突
             await addFile(db, {
                 message_id: messageId,
                 fileName: uniqueName,
@@ -911,38 +813,4 @@ export async function scanStorageAndImport(db, storage, userId, storageType, log
         await log(`扫描失败: ${e.message}`);
         throw e;
     }
-}
-
-/**
- * 递归获取分享文件夹下的所有文件（包含相对路径）
- */
-export async function getShareFolderAllFiles(db, folderId, userId) {
-    const filesList = [];
-    
-    // 递归辅助函数
-    async function recurse(currentId, currentPath) {
-        // 1. 获取当前目录下的文件
-        const sqlFiles = `SELECT CAST(message_id AS TEXT) AS message_id, fileName, size, file_id, storage_type, thumb_file_id FROM files WHERE folder_id = ? AND user_id = ? AND deleted_at IS NULL`;
-        const files = await db.all(sqlFiles, [currentId, userId]);
-        
-        for (const f of files) {
-            filesList.push({
-                ...f,
-                // 构建相对路径，例如 "子文件夹/文件.txt"
-                zipPath: currentPath ? `${currentPath}/${f.fileName}` : f.fileName
-            });
-        }
-
-        // 2. 获取子文件夹并递归
-        const sqlFolders = `SELECT id, name FROM folders WHERE parent_id = ? AND user_id = ? AND deleted_at IS NULL`;
-        const folders = await db.all(sqlFolders, [currentId, userId]);
-        
-        for (const f of folders) {
-            const nextPath = currentPath ? `${currentPath}/${f.name}` : f.name;
-            await recurse(f.id, nextPath);
-        }
-    }
-
-    await recurse(folderId, "");
-    return filesList;
 }
