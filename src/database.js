@@ -4,8 +4,6 @@ export default class Database {
     }
 
     async initDB() {
-        // [修复] 使用 this.run() 代替 this.d1.exec() 以避免本地环境下的兼容性错误
-        
         // 用户表
         await this.run(`
             CREATE TABLE IF NOT EXISTS users (
@@ -18,7 +16,6 @@ export default class Database {
         `);
 
         // 文件夹表
-        // 注意：增加 is_deleted 默认值，增加 share 相关字段
         await this.run(`
             CREATE TABLE IF NOT EXISTS folders (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -37,7 +34,7 @@ export default class Database {
         `);
 
         // 文件表
-        // [修复] 增加 tg_message_id 字段用于 Telegram 物理删除
+        // 注意：新安装用户会直接创建包含 tg_message_id 的表
         await this.run(`
             CREATE TABLE IF NOT EXISTS files (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -60,15 +57,7 @@ export default class Database {
             );
         `);
 
-        // 尝试自动迁移旧数据库：添加 tg_message_id 列
-        // 如果列已存在，SQLite 会抛出错误，我们直接忽略该错误即可
-        try {
-            await this.run("ALTER TABLE files ADD COLUMN tg_message_id INTEGER");
-        } catch (e) {
-            // 忽略“列已存在”的错误
-        }
-
-        // 认证 Token 表
+        // Token 表
         await this.run(`
             CREATE TABLE IF NOT EXISTS auth_tokens (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -78,7 +67,22 @@ export default class Database {
             );
         `);
 
-        console.log("数据库结构初始化完成 (已包含分享、回收站及 Telegram Message ID 字段)。");
+        // [优化] 自动迁移逻辑：尝试添加 tg_message_id 列
+        // 针对旧版本升级的用户
+        try {
+            await this.run("ALTER TABLE files ADD COLUMN tg_message_id INTEGER");
+            console.log("Migration Success: Added tg_message_id column.");
+        } catch (e) {
+            // 只有当错误信息明确包含 "duplicate" (列重复) 时才忽略
+            // 否则抛出异常或打印错误，方便调试
+            if (e.message && (e.message.includes('duplicate') || e.message.includes('exists'))) {
+                // 列已存在，忽略
+            } else {
+                console.warn("Migration Warning (tg_message_id):", e.message);
+            }
+        }
+
+        console.log("Database initialized.");
     }
 
     // 封装 D1 的 prepare 和 bind
