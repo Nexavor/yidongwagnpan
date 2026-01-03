@@ -37,7 +37,7 @@ export default class Database {
         `);
 
         // 文件表
-        // 注意：增加 is_deleted 默认值，增加 share 相关字段
+        // [修复] 增加 tg_message_id 字段用于 Telegram 物理删除
         await this.run(`
             CREATE TABLE IF NOT EXISTS files (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -46,6 +46,7 @@ export default class Database {
                 mimetype TEXT,
                 file_id TEXT NOT NULL,
                 thumb_file_id TEXT,
+                tg_message_id INTEGER,
                 date INTEGER,
                 size INTEGER,
                 folder_id INTEGER,
@@ -59,6 +60,14 @@ export default class Database {
             );
         `);
 
+        // 尝试自动迁移旧数据库：添加 tg_message_id 列
+        // 如果列已存在，SQLite 会抛出错误，我们直接忽略该错误即可
+        try {
+            await this.run("ALTER TABLE files ADD COLUMN tg_message_id INTEGER");
+        } catch (e) {
+            // 忽略“列已存在”的错误
+        }
+
         // 认证 Token 表
         await this.run(`
             CREATE TABLE IF NOT EXISTS auth_tokens (
@@ -69,7 +78,7 @@ export default class Database {
             );
         `);
 
-        console.log("数据库结构初始化完成 (已包含分享与回收站字段)。");
+        console.log("数据库结构初始化完成 (已包含分享、回收站及 Telegram Message ID 字段)。");
     }
 
     // 封装 D1 的 prepare 和 bind
