@@ -643,7 +643,16 @@ app.post('/api/file/save', async (c) => {
         const fileInfo = files[0];
         const blob = new Blob([content], { type: 'text/plain; charset=utf-8' });
         const up = await storage.upload(blob, fileInfo.fileName, 'text/plain; charset=utf-8', user.id, fileInfo.folder_id);
-        await data.updateFile(db, id, { file_id: up.fileId, size: blob.size, date: Date.now(), thumb_file_id: up.thumbId || null }, user.id);
+        
+        // [修改] 更新文件时也需要保存 tg_message_id (如果有)
+        await data.updateFile(db, id, { 
+            file_id: up.fileId, 
+            size: blob.size, 
+            date: Date.now(), 
+            thumb_file_id: up.thumbId || null,
+            tg_message_id: up.tgMessageId || null 
+        }, user.id);
+        
         return c.json({ success: true });
     } catch (e) { return c.json({ success: false, message: e.message }, 500); }
 });
@@ -653,19 +662,28 @@ app.post('/upload', async (c) => {
     const user = c.get('user'); const config = c.get('config');
     try {
         if(!storage) throw new Error("存储服务未配置");
-        const body = await c.req.parseBody();
+        
+        // [优化] 使用原生 formData 解析，避免 Hono parseBody 的潜在问题，并支持标准 File 对象
+        const formData = await c.req.raw.formData();
         const folderId = parseInt(decrypt(c.req.query('folderId')));
         const conflictMode = c.req.query('conflictMode') || 'rename';
+        
         if (isNaN(folderId)) throw new Error('Invalid Folder ID');
+        
         const files = [];
-        Object.keys(body).forEach(k => {
-            const v = body[k];
-            if (v instanceof File) files.push(v);
-            else if (Array.isArray(v)) v.forEach(f => { if(f instanceof File) files.push(f); });
-        });
+        for (const entry of formData.entries()) {
+             // entry[1] is the value. entry[0] is the key.
+             const val = entry[1];
+             if (val instanceof File) {
+                 files.push(val);
+             }
+        }
+
         if(!files.length) return c.json({success:false, message:'未接收到文件'}, 400);
+        
         const totalSize = files.reduce((a,b)=>a+b.size, 0);
         if(!await data.checkQuota(db, user.id, totalSize)) return c.json({success:false, message:'空间不足'}, 413);
+        
         const results = [];
         for(const file of files) {
             try {
@@ -676,12 +694,30 @@ app.post('/upload', async (c) => {
                 } else {
                     finalName = await data.getUniqueName(db, folderId, file.name, user.id, 'file');
                 }
+                
                 const up = await storage.upload(file, finalName, file.type, user.id, folderId, config);
+                
                 if(existing) {
-                    await data.updateFile(db, existing.message_id, { file_id: up.fileId, size: file.size, date: Date.now(), mimetype: file.type, thumb_file_id: up.thumbId || null }, user.id);
+                    await data.updateFile(db, existing.message_id, { 
+                        file_id: up.fileId, 
+                        size: file.size, 
+                        date: Date.now(), 
+                        mimetype: file.type, 
+                        thumb_file_id: up.thumbId || null,
+                        tg_message_id: up.tgMessageId || null // [修复] 保存 Telegram Message ID
+                    }, user.id);
                 } else {
                     const mid = (BigInt(Date.now()) * 1000n + BigInt(Math.floor(Math.random()*1000))).toString();
-                    await data.addFile(db, { message_id: mid, fileName: finalName, mimetype: file.type, size: file.size, file_id: up.fileId, thumb_file_id: up.thumbId || null, date: Date.now() }, folderId, user.id, config.storageMode);
+                    await data.addFile(db, { 
+                        message_id: mid, 
+                        fileName: finalName, 
+                        mimetype: file.type, 
+                        size: file.size, 
+                        file_id: up.fileId, 
+                        thumb_file_id: up.thumbId || null, 
+                        tg_message_id: up.tgMessageId || null, // [修复] 保存 Telegram Message ID
+                        date: Date.now() 
+                    }, folderId, user.id, config.storageMode);
                 }
                 results.push({name: finalName, success: true});
             } catch(e) { results.push({name: file.name, success: false, error: e.message}); }
