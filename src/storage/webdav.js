@@ -104,26 +104,42 @@ export class WebDAVStorage {
         const targets = files.map(f => f.file_id);
         const dirsToCheck = new Set(); // [新增] 用於記錄需要檢查的父目錄
 
+        // 1. 收集所有需要檢查的父目錄 (保持原邏輯)
         for (const path of targets) {
-            // 記錄父目錄路徑 (去掉文件名)
             const lastSlash = path.lastIndexOf('/');
             if (lastSlash !== -1) {
                 dirsToCheck.add(path.substring(0, lastSlash));
             }
-
-            const encodedPath = path.split('/').map(encodeURIComponent).join('/');
-            const url = `${this.endpoint}/${encodedPath}`;
-            
-            const headers = {};
-            if (this.authHeader) headers['Authorization'] = this.authHeader;
-
-            await fetch(url, {
-                method: 'DELETE',
-                headers: headers
-            });
         }
 
-        // [新增] 檢查並清理空目錄
+        // 2. [优化] 並發刪除文件 (替代原本的串行循環)
+        // 限制並發數為 5，避免觸發 WebDAV 服務器的頻率限制
+        const CONCURRENT_LIMIT = 5;
+        
+        for (let i = 0; i < targets.length; i += CONCURRENT_LIMIT) {
+            const chunk = targets.slice(i, i + CONCURRENT_LIMIT);
+            
+            // 使用 Promise.all 等待這一批刪除完成
+            await Promise.all(chunk.map(async (path) => {
+                const encodedPath = path.split('/').map(encodeURIComponent).join('/');
+                const url = `${this.endpoint}/${encodedPath}`;
+                
+                const headers = {};
+                if (this.authHeader) headers['Authorization'] = this.authHeader;
+
+                try {
+                    await fetch(url, {
+                        method: 'DELETE',
+                        headers: headers
+                    });
+                } catch (e) {
+                    // 記錄錯誤但不中斷整個流程
+                    console.error(`WebDAV Delete Error (${path}):`, e);
+                }
+            }));
+        }
+
+        // 3. [保持原邏輯] 檢查並清理空目錄 (保持串行以確保穩定性)
         for (const dir of dirsToCheck) {
             await this.deleteDirIfEmpty(dir);
         }
