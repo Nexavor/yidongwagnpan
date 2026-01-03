@@ -177,10 +177,8 @@ export async function setMaxStorageForUser(db, userId, maxBytes) {
 // =================================================================================
 
 export async function addFile(db, fileData, folderId = 1, userId, storageType) {
-    // [修复] 接收 tg_message_id
     const { message_id, fileName, mimetype, file_id, thumb_file_id, tg_message_id, date, size } = fileData;
     
-    // [修复] 插入 SQL 包含 tg_message_id
     const sql = `INSERT INTO files (message_id, fileName, mimetype, file_id, thumb_file_id, tg_message_id, date, size, folder_id, user_id, storage_type, is_deleted)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`;
     
@@ -201,7 +199,6 @@ export async function addFile(db, fileData, folderId = 1, userId, storageType) {
 
 export async function updateFile(db, fileId, updates, userId) {
     const fields = []; const values = [];
-    // [修复] 允许更新 tg_message_id
     const validKeys = ['fileName', 'mimetype', 'file_id', 'thumb_file_id', 'tg_message_id', 'size', 'date', 'message_id'];
     for (const key in updates) {
         if (Object.hasOwnProperty.call(updates, key) && validKeys.includes(key)) {
@@ -285,7 +282,7 @@ export async function getFolderContents(db, folderId, userId) {
     const files = await db.all(sqlFiles, [folderId, userId]);
 
     return {
-        folders: folders.map(f => ({ ...f, encrypted_id: encrypt ? encrypt(f.id) : f.id })), // [修复] 防御 encrypt 为空
+        folders: folders.map(f => ({ ...f, encrypted_id: encrypt ? encrypt(f.id) : f.id })), 
         files: files
     };
 }
@@ -803,7 +800,7 @@ export async function getTrashContents(db, userId) {
     `;
     const folders = await db.all(sqlFolders, [userId]);
     const files = await db.all(sqlFiles, [userId]);
-    // [修复] 增加对 encrypt 的存在性检查，防止 (void 0) is not a function 错误
+    
     return { 
         folders: folders.map(f => ({ ...f, encrypted_id: encrypt ? encrypt(f.id) : f.id })), 
         files 
@@ -890,7 +887,7 @@ export async function getActiveShares(db, userId) {
         let pid = item.parent_id;
         return {
             ...item,
-            encrypted_parent_id: encrypt && pid ? encrypt(pid) : null // [修复] 防御 encrypt 为空
+            encrypted_parent_id: encrypt && pid ? encrypt(pid) : null 
         };
     });
 }
@@ -1000,4 +997,50 @@ export async function getShareFolderAllFiles(db, folderId, userId) {
     }
     await recurse(folderId, "");
     return filesList;
+}
+
+// =================================================================================
+// 13. [新增] 定時清理任務
+// =================================================================================
+
+// 1. 清理過期的認證 Token
+export async function cleanupExpiredTokens(db) {
+    const now = Date.now();
+    await db.run("DELETE FROM auth_tokens WHERE expires_at < ?", [now]);
+}
+
+// 2. 清理回收站中過期的文件（默認 30 天）
+export async function cleanupTrash(db, storage, retentionDays = 30) {
+    const cutoff = Date.now() - (retentionDays * 24 * 60 * 60 * 1000);
+
+    // 1. 查找過期的文件
+    const files = await db.all(`SELECT ${SAFE_SELECT_MESSAGE_ID}, user_id FROM files WHERE is_deleted = 1 AND deleted_at < ?`, [cutoff]);
+
+    // 2. 查找過期的文件夾
+    const folders = await db.all(`SELECT id, user_id FROM folders WHERE is_deleted = 1 AND deleted_at < ?`, [cutoff]);
+
+    if (files.length === 0 && folders.length === 0) return;
+
+    // 按用戶分組處理（因為 unifiedDelete 需要 userId）
+    const operations = new Map();
+
+    for (const f of files) {
+        if (!operations.has(f.user_id)) operations.set(f.user_id, { files: [], folders: [] });
+        operations.get(f.user_id).files.push(f.message_id);
+    }
+
+    for (const f of folders) {
+        if (!operations.has(f.user_id)) operations.set(f.user_id, { files: [], folders: [] });
+        operations.get(f.user_id).folders.push(f.id);
+    }
+
+    // 對每個用戶執行清理
+    for (const [userId, ops] of operations) {
+        try {
+            await unifiedDelete(db, storage, null, null, userId, ops.files, ops.folders);
+            console.log(`[AutoCleanup] User ${userId}: Cleaned ${ops.files.length} files, ${ops.folders.length} folders.`);
+        } catch (e) {
+            console.error(`[AutoCleanup] Failed for user ${userId}:`, e);
+        }
+    }
 }
