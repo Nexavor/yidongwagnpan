@@ -1,16 +1,22 @@
+// [优化] 引入全局变量作为缓存，在 Worker 实例生命周期内复用配置
+// 避免每个请求都去读取 KV，节省费用并提升速度
+let globalConfigCache = null;
+
 export default class ConfigManager {
     constructor(kv) {
         this.kv = kv;
-        this.cache = null;
     }
 
     async load() {
-        if (this.cache) return this.cache;
+        // 1. 优先从全局内存缓存读取
+        if (globalConfigCache) return globalConfigCache;
         
         try {
+            // 2. 缓存未命中，从 KV 读取
             const data = await this.kv.get('config', { type: 'json' });
+            
             // 提供默认值，防止 null 导致报错
-            this.cache = data || {
+            globalConfigCache = data || {
                 storageMode: '', // 移除默认 'local'，留空迫使用户配置
                 s3: {},
                 webdav: {},
@@ -18,14 +24,17 @@ export default class ConfigManager {
             };
         } catch (e) {
             console.error("Config Load Error:", e);
-            this.cache = {}; // 降级处理
+            // 发生错误时给予空对象，避免系统崩溃，但暂存入缓存防止死循环重试
+            globalConfigCache = {}; 
         }
-        return this.cache;
+        return globalConfigCache;
     }
 
     async save(newConfig) {
+        // 必须先加载现有配置以进行合并
         const current = await this.load();
-        // 深度合并配置，防止覆盖
+        
+        // 深度合并配置，防止覆盖未修改的字段
         const updated = {
             ...current,
             ...newConfig,
@@ -35,9 +44,11 @@ export default class ConfigManager {
             telegram: { ...(current.telegram || {}), ...(newConfig.telegram || {}) }
         };
 
-        // 移除 undefined 或 null 的键（可选）
+        // 写入 KV
         await this.kv.put('config', JSON.stringify(updated));
-        this.cache = updated;
+        
+        // [优化] 更新全局缓存，确保后续请求立即生效
+        globalConfigCache = updated;
         return true;
     }
 }
