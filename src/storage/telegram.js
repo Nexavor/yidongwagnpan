@@ -28,13 +28,16 @@ export class TelegramStorage {
             throw new Error(`Telegram API Error: ${data.description}`);
         }
 
-        // 获取 file_id，优先选择最大的 file_id (虽然后端通常只返回一个 document)
+        // 获取 file_id
         const doc = data.result.document;
         const fileId = doc.file_id;
+        // [修复] 获取 message_id 用于后续删除
+        const messageId = data.result.message_id;
 
         return {
             fileId: fileId,
-            thumbId: data.result.thumb ? data.result.thumb.file_id : null
+            thumbId: data.result.thumb ? data.result.thumb.file_id : null,
+            tgMessageId: messageId // 返回给 worker 保存到数据库
         };
     }
 
@@ -64,12 +67,46 @@ export class TelegramStorage {
     }
 
     async remove(files, folders, userId) {
-        // Telegram Bot API 不支持通过 file_id 删除服务器上的文件。
-        // 删除 message 需要 message_id，但我们目前只存储了 file_id。
-        // 因此这里仅做空操作，依靠数据库层面的删除来“软删除”文件。
-        // 如果需要物理删除，需要在 files 表中额外存储 message_id。
-        console.log(`[TelegramStorage] Skipping physical deletion for ${files.length} files (API limitation).`);
-        return;
+        // [修复] 实现 Telegram 消息批量删除
+        if (!files || files.length === 0) return;
+
+        // 从文件记录中提取 tg_message_id
+        // 过滤掉没有 message_id 的旧文件记录
+        const messageIds = files
+            .map(f => f.tg_message_id)
+            .filter(id => id !== null && id !== undefined);
+
+        if (messageIds.length === 0) return;
+
+        // Telegram deleteMessages API 限制每次最多删除 100 条消息
+        const chunkSize = 100;
+        for (let i = 0; i < messageIds.length; i += chunkSize) {
+            const chunk = messageIds.slice(i, i + chunkSize);
+            try {
+                const res = await fetch(`${this.apiUrl}/deleteMessages`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        chat_id: this.chatId,
+                        message_ids: chunk
+                    })
+                });
+
+                if (!res.ok) {
+                    const errText = await res.text();
+                    console.error(`Telegram Delete Error (Batch ${i}): ${res.status} - ${errText}`);
+                } else {
+                    const data = await res.json();
+                    if (!data.ok) {
+                        console.error(`Telegram Delete API Error (Batch ${i}): ${data.description}`);
+                    }
+                }
+            } catch (e) {
+                console.error(`Telegram Delete Exception (Batch ${i}):`, e);
+            }
+        }
     }
 
     async list(prefix) {
