@@ -72,36 +72,50 @@ export class S3Storage {
     }
 
     async remove(files, folders, userId) {
+        if (!files || files.length === 0) return;
+
         const keysToDelete = files.map(f => f.file_id);
-        const dirsToCheck = new Set(); // [新增] 記錄父目錄
+        const dirsToCheck = new Set(); // 记录父目录以便后续清理
+
+        // 预处理：收集所有涉及的父目录
+        for (const key of keysToDelete) {
+            const lastSlash = key.lastIndexOf('/');
+            if (lastSlash !== -1) dirsToCheck.add(key.substring(0, lastSlash));
+        }
+
+        // [优化] 分批并发处理，防止触发 Worker 子请求数量限制
+        // 建议并发数控制在 10-20 左右
+        const CONCURRENT_LIMIT = 10;
 
         if (this.isR2Binding) {
-            for (const key of keysToDelete) {
-                await this.bucket.delete(key);
-                // 提取父目錄
-                const lastSlash = key.lastIndexOf('/');
-                if (lastSlash !== -1) dirsToCheck.add(key.substring(0, lastSlash));
+            for (let i = 0; i < keysToDelete.length; i += CONCURRENT_LIMIT) {
+                const chunk = keysToDelete.slice(i, i + CONCURRENT_LIMIT);
+                // R2 Binding 并发删除
+                await Promise.all(chunk.map(key => this.bucket.delete(key)));
             }
         } else {
-            for (const key of keysToDelete) {
-                const url = `${this.endpoint}/${this.bucketName}/${encodeURIComponent(key)}`;
-                await this.client.fetch(url, { method: 'DELETE' });
-                
-                const lastSlash = key.lastIndexOf('/');
-                if (lastSlash !== -1) dirsToCheck.add(key.substring(0, lastSlash));
+            for (let i = 0; i < keysToDelete.length; i += CONCURRENT_LIMIT) {
+                const chunk = keysToDelete.slice(i, i + CONCURRENT_LIMIT);
+                // S3 API 并发删除
+                await Promise.all(chunk.map(key => {
+                    const url = `${this.endpoint}/${this.bucketName}/${encodeURIComponent(key)}`;
+                    return this.client.fetch(url, { method: 'DELETE' });
+                }));
             }
         }
 
-        // [新增] 檢查並清理空目錄
-        for (const dir of dirsToCheck) {
-            await this.cleanupEmptyDir(dir);
+        // [优化] 并发检查并清理空目录
+        const dirsArray = Array.from(dirsToCheck);
+        for (let i = 0; i < dirsArray.length; i += CONCURRENT_LIMIT) {
+            const chunk = dirsArray.slice(i, i + CONCURRENT_LIMIT);
+            await Promise.all(chunk.map(dir => this.cleanupEmptyDir(dir)));
         }
     }
 
-    // [新增] 檢查並刪除 S3 目錄標記 (如果存在)
+    // 检查并删除 S3 目录标记 (如果存在)
     async cleanupEmptyDir(dir) {
         try {
-            // 檢查該前綴下是否還有文件
+            // 检查该前綴下是否还有文件
             const contents = await this.list(dir + '/');
             if (contents.length === 0) {
                 // 如果為空，嘗試刪除目錄對象本身 (通常是 key 以 / 結尾的 0字節對象)
