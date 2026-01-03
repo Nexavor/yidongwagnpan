@@ -2,8 +2,9 @@ import path from 'node:path';
 import bcrypt from 'bcryptjs';
 import { encrypt, decrypt } from './crypto.js';
 
+// [修复] 增加 tg_message_id 字段
 const ALL_FILE_COLUMNS = `
-    fileName, mimetype, file_id, thumb_file_id, date, size, folder_id, user_id, storage_type, is_deleted, deleted_at
+    fileName, mimetype, file_id, thumb_file_id, tg_message_id, date, size, folder_id, user_id, storage_type, is_deleted, deleted_at
 `;
 
 const SAFE_SELECT_MESSAGE_ID = `CAST(message_id AS TEXT) AS message_id`;
@@ -176,18 +177,21 @@ export async function setMaxStorageForUser(db, userId, maxBytes) {
 // =================================================================================
 
 export async function addFile(db, fileData, folderId = 1, userId, storageType) {
-    const { message_id, fileName, mimetype, file_id, thumb_file_id, date, size } = fileData;
-    const sql = `INSERT INTO files (message_id, fileName, mimetype, file_id, thumb_file_id, date, size, folder_id, user_id, storage_type, is_deleted)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`;
+    // [修复] 接收 tg_message_id
+    const { message_id, fileName, mimetype, file_id, thumb_file_id, tg_message_id, date, size } = fileData;
+    
+    // [修复] 插入 SQL 包含 tg_message_id
+    const sql = `INSERT INTO files (message_id, fileName, mimetype, file_id, thumb_file_id, tg_message_id, date, size, folder_id, user_id, storage_type, is_deleted)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`;
     
     try {
-        const result = await db.run(sql, [message_id, fileName, mimetype, file_id, thumb_file_id, date, size, folderId, userId, storageType]);
+        const result = await db.run(sql, [message_id, fileName, mimetype, file_id, thumb_file_id, tg_message_id || null, date, size, folderId, userId, storageType]);
         return { success: true, id: result.meta.last_row_id || 0, fileId: message_id };
     } catch (err) {
         if (err.message && err.message.includes('UNIQUE')) {
             const resolved = await handleTrashConflict(db, 'files', 'fileName', 'folder_id', fileName, folderId, userId);
             if (resolved) {
-                const retryResult = await db.run(sql, [message_id, fileName, mimetype, file_id, thumb_file_id, date, size, folderId, userId, storageType]);
+                const retryResult = await db.run(sql, [message_id, fileName, mimetype, file_id, thumb_file_id, tg_message_id || null, date, size, folderId, userId, storageType]);
                 return { success: true, id: retryResult.meta.last_row_id || 0, fileId: message_id };
             }
         }
@@ -197,7 +201,8 @@ export async function addFile(db, fileData, folderId = 1, userId, storageType) {
 
 export async function updateFile(db, fileId, updates, userId) {
     const fields = []; const values = [];
-    const validKeys = ['fileName', 'mimetype', 'file_id', 'thumb_file_id', 'size', 'date', 'message_id'];
+    // [修复] 允许更新 tg_message_id
+    const validKeys = ['fileName', 'mimetype', 'file_id', 'thumb_file_id', 'tg_message_id', 'size', 'date', 'message_id'];
     for (const key in updates) {
         if (Object.hasOwnProperty.call(updates, key) && validKeys.includes(key)) {
             fields.push(`${key} = ?`);
