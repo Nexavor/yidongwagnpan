@@ -626,10 +626,10 @@ export async function moveItems(db, storage, fileIds = [], folderIds = [], targe
 }
 
 // =================================================================================
-// [修复] 还原逻辑辅助函数 (定义顺序调整)
+// [修复] 还原逻辑辅助函数
 // =================================================================================
 
-// 先定义级联还原
+// 级联还原
 async function cascadeRestore(db, folderId, userId) {
     await db.run(`UPDATE files SET is_deleted = 0, deleted_at = NULL WHERE folder_id = ? AND user_id = ?`, [folderId, userId]);
     const subs = await db.all(`SELECT id FROM folders WHERE parent_id = ? AND user_id = ?`, [folderId, userId]);
@@ -639,7 +639,7 @@ async function cascadeRestore(db, folderId, userId) {
     }
 }
 
-// 再定义调用了 cascadeRestore 的还原合并函数
+// 还原合并函数
 async function restoreAndMergeFolder(db, sourceId, targetId, userId, conflictMode) {
     const files = await db.all(`SELECT ${SAFE_SELECT_MESSAGE_ID}, fileName FROM files WHERE folder_id = ? AND user_id = ?`, [sourceId, userId]); 
     
@@ -684,15 +684,20 @@ async function restoreAndMergeFolder(db, sourceId, targetId, userId, conflictMod
     }
 }
 
-// 最后定义主入口
+// 主入口: 还原项目
 export async function restoreItems(db, storage, fileIds = [], folderIds = [], userId, conflictMode = 'rename') {
-    for (const id of (folderIds || [])) {
+    // 确保 folderIds 是数组
+    const safeFolderIds = Array.isArray(folderIds) ? folderIds : [];
+    const safeFileIds = Array.isArray(fileIds) ? fileIds : [];
+
+    for (const id of safeFolderIds) {
         const folder = await db.get("SELECT id, name, parent_id FROM folders WHERE id = ? AND user_id = ?", [id, userId]);
         if (!folder) continue;
 
         let targetParentId = folder.parent_id;
         if (targetParentId) {
              const parent = await db.get("SELECT is_deleted FROM folders WHERE id = ?", [targetParentId]);
+             // 如果父文件夹不存在或已删除，还原到根目录
              if (!parent || parent.is_deleted) {
                  const root = await getRootFolder(db, userId);
                  targetParentId = root.id;
@@ -731,7 +736,7 @@ export async function restoreItems(db, storage, fileIds = [], folderIds = [], us
         }
     }
 
-    for (const id of (fileIds || [])) {
+    for (const id of safeFileIds) {
         const file = await db.get("SELECT message_id, fileName, folder_id FROM files WHERE message_id = ? AND user_id = ?", [id, userId]);
         if (!file) continue;
 
