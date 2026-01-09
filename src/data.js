@@ -1,24 +1,41 @@
-import path from 'node:path';
 import bcrypt from 'bcryptjs';
 import { encrypt, decrypt } from './crypto.js';
 
-// [配置] 数据库列定义
+// =================================================================================
+// 0. 基础配置与辅助工具 (不依赖外部库)
+// =================================================================================
+
 const ALL_FILE_COLUMNS = `
     fileName, mimetype, file_id, thumb_file_id, tg_message_id, date, size, folder_id, user_id, storage_type, is_deleted, deleted_at
 `;
 const SAFE_SELECT_MESSAGE_ID = `CAST(message_id AS TEXT) AS message_id`;
 const SAFE_SELECT_ID_AS_TEXT = `CAST(message_id AS TEXT) AS id`;
 
+// 替代 path.basename 的简单实现，避免 node:path 兼容性问题
+function getBasename(filePath) {
+    if (!filePath) return '';
+    const parts = filePath.split(/[/\\]/);
+    return parts.pop();
+}
+
+function formatSize(bytes) {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
 // =================================================================================
-// 1. 基础辅助函数 (必须定义在最前面)
+// 1. 核心内部函数 (定义在最前，确保互相可见)
 // =================================================================================
 
-export async function getUniqueName(db, folderId, originalName, userId, type) {
+// [内部] 获取唯一名称
+async function getUniqueName(db, folderId, originalName, userId, type) {
     const table = type === 'file' ? 'files' : 'folders';
     const col = type === 'file' ? 'fileName' : 'name';
     const parentCol = type === 'file' ? 'folder_id' : 'parent_id';
     
-    // 基础检查
     const exists = await db.get(
         `SELECT 1 as exists_flag FROM ${table} WHERE ${col} = ? AND ${parentCol} = ? AND user_id = ? AND deleted_at IS NULL`, 
         [originalName, folderId, userId]
@@ -26,7 +43,6 @@ export async function getUniqueName(db, folderId, originalName, userId, type) {
     
     if (!exists) return originalName;
 
-    // 生成新名字
     let name = originalName;
     let ext = '';
     if (type === 'file') {
@@ -49,15 +65,7 @@ export async function getUniqueName(db, folderId, originalName, userId, type) {
     }
 }
 
-function formatSize(bytes) {
-    if (bytes === 0) return '0 B';
-    const k = 1024;
-    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-}
-
-// 处理因“软删除”文件导致的唯一约束冲突
+// [内部] 处理回收站冲突
 async function handleTrashConflict(db, table, nameCol, parentCol, nameVal, parentVal, userId) {
     const row = await db.get(
         `SELECT id, message_id FROM ${table} WHERE ${nameCol} = ? AND ${parentCol} = ? AND user_id = ? AND deleted_at IS NOT NULL`,
@@ -74,7 +82,7 @@ async function handleTrashConflict(db, table, nameCol, parentCol, nameVal, paren
     return false; 
 }
 
-// [关键修复] 级联还原函数 - 必须定义在 restoreItems 之前
+// [内部] 级联还原 (递归)
 async function cascadeRestore(db, folderId, userId) {
     await db.run(`UPDATE files SET is_deleted = 0, deleted_at = NULL WHERE folder_id = ? AND user_id = ?`, [folderId, userId]);
     const subs = await db.all(`SELECT id FROM folders WHERE parent_id = ? AND user_id = ?`, [folderId, userId]);
@@ -84,14 +92,12 @@ async function cascadeRestore(db, folderId, userId) {
     }
 }
 
-// [关键修复] 还原并合并文件夹函数 - 必须定义在 restoreItems 之前
+// [内部] 还原并合并文件夹 (递归)
 async function restoreAndMergeFolder(db, sourceId, targetId, userId, conflictMode) {
     // 1. 合并文件
     const files = await db.all(`SELECT ${SAFE_SELECT_MESSAGE_ID}, fileName FROM files WHERE folder_id = ? AND user_id = ?`, [sourceId, userId]); 
-    
     for (const file of files) {
         const existing = await db.get(`SELECT ${SAFE_SELECT_MESSAGE_ID} FROM files WHERE folder_id = ? AND fileName = ? AND user_id = ? AND deleted_at IS NULL`, [targetId, file.fileName, userId]);
-        
         if (existing) {
              if (conflictMode === 'overwrite') {
                 const trashName = `${file.fileName}_overwritten_${Date.now()}`;
@@ -107,13 +113,10 @@ async function restoreAndMergeFolder(db, sourceId, targetId, userId, conflictMod
              await db.run(`UPDATE files SET is_deleted = 0, deleted_at = NULL, folder_id = ? WHERE message_id = ? AND user_id = ?`, [targetId, file.message_id, userId]);
         }
     }
-
-    // 2. 合并子文件夹
+    // 2. 合并文件夹
     const folders = await db.all(`SELECT id, name FROM folders WHERE parent_id = ? AND user_id = ?`, [sourceId, userId]);
-    
     for (const folder of folders) {
         const existing = await db.get(`SELECT id FROM folders WHERE parent_id = ? AND name = ? AND user_id = ? AND deleted_at IS NULL`, [targetId, folder.name, userId]);
-        
         if (existing) {
              if (conflictMode === 'overwrite') {
                  await restoreAndMergeFolder(db, folder.id, existing.id, userId, conflictMode);
@@ -131,14 +134,11 @@ async function restoreAndMergeFolder(db, sourceId, targetId, userId, conflictMod
     }
 }
 
-// 移动逻辑使用的递归合并函数
+// [内部] 移动并合并文件夹 (递归)
 async function mergeFolders(db, sourceId, targetId, userId, conflictMode) {
-    // 1. 合并文件
     const files = await db.all(`SELECT ${SAFE_SELECT_MESSAGE_ID}, fileName FROM files WHERE folder_id = ? AND user_id = ? AND deleted_at IS NULL`, [sourceId, userId]);
-    
     for (const file of files) {
         const existing = await db.get(`SELECT ${SAFE_SELECT_MESSAGE_ID} FROM files WHERE folder_id = ? AND fileName = ? AND user_id = ? AND deleted_at IS NULL`, [targetId, file.fileName, userId]);
-        
         if (existing) {
             if (conflictMode === 'overwrite') {
                 const trashName = `${file.fileName}_overwritten_${Date.now()}`;
@@ -161,13 +161,9 @@ async function mergeFolders(db, sourceId, targetId, userId, conflictMode) {
             }
         }
     }
-
-    // 2. 合并子文件夹
     const folders = await db.all(`SELECT id, name FROM folders WHERE parent_id = ? AND user_id = ? AND deleted_at IS NULL`, [sourceId, userId]);
-    
     for (const folder of folders) {
         const existing = await db.get(`SELECT id FROM folders WHERE parent_id = ? AND name = ? AND user_id = ? AND deleted_at IS NULL`, [targetId, folder.name, userId]);
-        
         if (existing) {
             if (conflictMode === 'overwrite') {
                 await mergeFolders(db, folder.id, existing.id, userId, conflictMode);
@@ -193,13 +189,101 @@ async function mergeFolders(db, sourceId, targetId, userId, conflictMode) {
     }
 }
 
+// [内部] 删除逻辑辅助
+async function getFolderDeletionData(db, folderId, userId) {
+    let filesToDelete = []; let foldersToDeleteIds = [folderId];
+    async function findContentsRecursive(currentFolderId) {
+        const sqlFiles = `SELECT ${SAFE_SELECT_MESSAGE_ID}, ${ALL_FILE_COLUMNS} FROM files WHERE folder_id = ? AND user_id = ?`;
+        const files = await db.all(sqlFiles, [currentFolderId, userId]);
+        filesToDelete.push(...files);
+        const sqlFolders = `SELECT id FROM folders WHERE parent_id = ? AND user_id = ?`;
+        const subFolders = await db.all(sqlFolders, [currentFolderId, userId]);
+        for (const subFolder of subFolders) {
+            foldersToDeleteIds.push(subFolder.id);
+            await findContentsRecursive(subFolder.id);
+        }
+    }
+    await findContentsRecursive(folderId);
+    const foldersToDelete = foldersToDeleteIds.map(id => ({ id }));
+    return { files: filesToDelete, folders: foldersToDelete };
+}
+
+async function executeDeletion(db, fileIds, folderIds, userId) {
+    if (fileIds.length === 0 && folderIds.length === 0) return { success: true };
+    if (fileIds.length > 0) {
+        const place = fileIds.map(() => '?').join(',');
+        await db.run(`DELETE FROM files WHERE message_id IN (${place}) AND user_id = ?`, [...fileIds, userId]);
+    }
+    if (folderIds.length > 0) {
+        const place = Array.from(new Set(folderIds)).map(() => '?').join(',');
+        await db.run(`DELETE FROM folders WHERE id IN (${place}) AND user_id = ?`, [...new Set(folderIds), userId]);
+    }
+    return { success: true };
+}
+
 // =================================================================================
-// 2. 核心导出函数
+// 2. 导出函数 (Exports)
 // =================================================================================
 
-// ---------------------------
-// 还原逻辑主入口
-// ---------------------------
+// 重新导出内部函数，供外部调用 (如 import { getUniqueName } ...)
+export { getUniqueName };
+
+export async function getRootFolder(db, userId) {
+    return await db.get("SELECT id FROM folders WHERE user_id = ? AND parent_id IS NULL", [userId]);
+}
+
+export async function getFilesByIds(db, messageIds, userId) {
+    if (!messageIds || messageIds.length === 0) return [];
+    const placeholders = messageIds.map(() => '?').join(',');
+    const sql = `SELECT ${SAFE_SELECT_MESSAGE_ID}, ${ALL_FILE_COLUMNS} FROM files WHERE message_id IN (${placeholders}) AND user_id = ?`;
+    return await db.all(sql, [...messageIds, userId]);
+}
+
+// [新增] 检查还原冲突的函数
+export async function checkRestoreConflicts(db, fileIds, folderIds, userId) {
+    const conflicts = [];
+    const safeFolderIds = Array.isArray(folderIds) ? folderIds : [];
+    const safeFileIds = Array.isArray(fileIds) ? fileIds : [];
+
+    // Check Folders
+    for (const id of safeFolderIds) {
+        const folder = await db.get("SELECT id, name, parent_id FROM folders WHERE id = ? AND user_id = ?", [id, userId]);
+        if (!folder) continue;
+        
+        let targetParentId = folder.parent_id;
+        if (targetParentId) {
+             const parent = await db.get("SELECT is_deleted FROM folders WHERE id = ?", [targetParentId]);
+             if (!parent || parent.is_deleted) {
+                 const root = await getRootFolder(db, userId);
+                 targetParentId = root.id;
+             }
+        }
+
+        const existing = await db.get("SELECT 1 FROM folders WHERE parent_id = ? AND name = ? AND user_id = ? AND deleted_at IS NULL", [targetParentId, folder.name, userId]);
+        if (existing) conflicts.push({ type: 'folder', id: folder.id, name: folder.name });
+    }
+
+    // Check Files
+    for (const id of safeFileIds) {
+         const file = await db.get("SELECT message_id, fileName, folder_id FROM files WHERE message_id = ? AND user_id = ?", [id, userId]);
+         if (!file) continue;
+
+         let targetFolderId = file.folder_id;
+         if (targetFolderId) {
+             const parent = await db.get("SELECT is_deleted FROM folders WHERE id = ?", [targetFolderId]);
+             if (!parent || parent.is_deleted) {
+                 const root = await getRootFolder(db, userId);
+                 targetFolderId = root.id;
+             }
+         }
+
+         const existing = await db.get("SELECT 1 FROM files WHERE folder_id = ? AND fileName = ? AND user_id = ? AND deleted_at IS NULL", [targetFolderId, file.fileName, userId]);
+         if (existing) conflicts.push({ type: 'file', id: file.message_id, name: file.fileName });
+    }
+    
+    return conflicts;
+}
+
 export async function restoreItems(db, storage, fileIds = [], folderIds = [], userId, conflictMode = 'rename') {
     const safeFolderIds = Array.isArray(folderIds) ? folderIds : [];
     const safeFileIds = Array.isArray(fileIds) ? fileIds : [];
@@ -297,9 +381,6 @@ export async function restoreItems(db, storage, fileIds = [], folderIds = [], us
     return { success: true };
 }
 
-// ---------------------------
-// 移动逻辑主入口
-// ---------------------------
 export async function moveItems(db, storage, fileIds = [], folderIds = [], targetFolderId, userId, conflictMode = 'rename') {
     // 1. 处理文件移动
     for (const fileId of fileIds) {
@@ -375,10 +456,6 @@ export async function moveItems(db, storage, fileIds = [], folderIds = [], targe
     return { success: true };
 }
 
-// =================================================================================
-// 3. 用户管理
-// =================================================================================
-
 export async function createUser(db, username, hashedPassword) {
     const sql = `INSERT INTO users (username, password, is_admin, max_storage_bytes) VALUES (?, ?, 0, 1073741824)`;
     const result = await db.run(sql, [username, hashedPassword]);
@@ -414,10 +491,6 @@ export async function deleteUser(db, userId) {
     const result = await db.run(sql, [userId]);
     return { success: true, changes: result.meta.changes };
 }
-
-// =================================================================================
-// 4. 配额管理
-// =================================================================================
 
 export async function getUserQuota(db, userId) {
     const user = await db.get("SELECT max_storage_bytes FROM users WHERE id = ?", [userId]);
@@ -458,10 +531,6 @@ export async function setMaxStorageForUser(db, userId, maxBytes) {
     return { success: true, changes: result.meta.changes };
 }
 
-// =================================================================================
-// 5. 文件操作
-// =================================================================================
-
 export async function addFile(db, fileData, folderId = 1, userId, storageType) {
     const { message_id, fileName, mimetype, file_id, thumb_file_id, tg_message_id, date, size } = fileData;
     const sql = `INSERT INTO files (message_id, fileName, mimetype, file_id, thumb_file_id, tg_message_id, date, size, folder_id, user_id, storage_type, is_deleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`;
@@ -498,21 +567,10 @@ export async function updateFile(db, fileId, updates, userId) {
     return { success: true, changes: result.meta.changes };
 }
 
-export async function getFilesByIds(db, messageIds, userId) {
-    if (!messageIds || messageIds.length === 0) return [];
-    const placeholders = messageIds.map(() => '?').join(',');
-    const sql = `SELECT ${SAFE_SELECT_MESSAGE_ID}, ${ALL_FILE_COLUMNS} FROM files WHERE message_id IN (${placeholders}) AND user_id = ?`;
-    return await db.all(sql, [...messageIds, userId]);
-}
-
 export async function checkFileExist(db, folderId, fileName, userId) {
     const result = await db.get("SELECT 1 FROM files WHERE folder_id = ? AND fileName = ? AND user_id = ? AND deleted_at IS NULL", [folderId, fileName, userId]);
     return !!result;
 }
-
-// =================================================================================
-// 6. 文件夹操作
-// =================================================================================
 
 export async function createFolder(db, name, parentId, userId) {
     const sql = `INSERT INTO folders (name, parent_id, user_id, is_deleted) VALUES (?, ?, ?, 0)`;
@@ -556,10 +614,6 @@ export async function getFolderContents(db, folderId, userId) {
     return { folders: folders.map(f => ({ ...f, encrypted_id: encrypt ? encrypt(f.id) : f.id })), files: files };
 }
 
-export async function getRootFolder(db, userId) {
-    return await db.get("SELECT id FROM folders WHERE user_id = ? AND parent_id IS NULL", [userId]);
-}
-
 export async function getFolderPath(db, folderId, userId) {
     let pathArr = []; let currentId = folderId;
     while (currentId) {
@@ -577,10 +631,6 @@ export async function getAllFolders(db, userId) {
     const rows = await db.all(sql, [userId]);
     return rows.map(folder => ({ ...folder, encrypted_id: encrypt ? encrypt(folder.id) : folder.id }));
 }
-
-// =================================================================================
-// 7. 搜索
-// =================================================================================
 
 export async function searchItems(db, query, userId) {
     const searchQuery = `%${query}%`;
@@ -613,10 +663,6 @@ export async function searchItems(db, query, userId) {
     const files = await db.all(sqlFiles, [userId, userId, searchQuery, userId]);
     return { folders: folders.map(f => ({ ...f, encrypted_id: encrypt ? encrypt(f.id) : f.id })), files };
 }
-
-// =================================================================================
-// 8. 回收站与删除
-// =================================================================================
 
 export async function unifiedDelete(db, storage, itemId, itemType, userId, explicitFileIds = null, explicitFolderIds = null) {
     let checkIds = [];
@@ -657,37 +703,6 @@ export async function unifiedDelete(db, storage, itemId, itemType, userId, expli
     if (explicitFolderIds) folderIdsToDelete = [...new Set([...folderIdsToDelete, ...explicitFolderIds])];
     else if (itemType === 'folder') folderIdsToDelete.push(itemId);
     await executeDeletion(db, fileIdsToDelete, folderIdsToDelete, userId);
-}
-
-export async function getFolderDeletionData(db, folderId, userId) {
-    let filesToDelete = []; let foldersToDeleteIds = [folderId];
-    async function findContentsRecursive(currentFolderId) {
-        const sqlFiles = `SELECT ${SAFE_SELECT_MESSAGE_ID}, ${ALL_FILE_COLUMNS} FROM files WHERE folder_id = ? AND user_id = ?`;
-        const files = await db.all(sqlFiles, [currentFolderId, userId]);
-        filesToDelete.push(...files);
-        const sqlFolders = `SELECT id FROM folders WHERE parent_id = ? AND user_id = ?`;
-        const subFolders = await db.all(sqlFolders, [currentFolderId, userId]);
-        for (const subFolder of subFolders) {
-            foldersToDeleteIds.push(subFolder.id);
-            await findContentsRecursive(subFolder.id);
-        }
-    }
-    await findContentsRecursive(folderId);
-    const foldersToDelete = foldersToDeleteIds.map(id => ({ id }));
-    return { files: filesToDelete, folders: foldersToDelete };
-}
-
-export async function executeDeletion(db, fileIds, folderIds, userId) {
-    if (fileIds.length === 0 && folderIds.length === 0) return { success: true };
-    if (fileIds.length > 0) {
-        const place = fileIds.map(() => '?').join(',');
-        await db.run(`DELETE FROM files WHERE message_id IN (${place}) AND user_id = ?`, [...fileIds, userId]);
-    }
-    if (folderIds.length > 0) {
-        const place = Array.from(new Set(folderIds)).map(() => '?').join(',');
-        await db.run(`DELETE FROM folders WHERE id IN (${place}) AND user_id = ?`, [...new Set(folderIds), userId]);
-    }
-    return { success: true };
 }
 
 export async function softDeleteItems(db, fileIds = [], folderIds = [], userId) {
@@ -749,10 +764,6 @@ export async function emptyTrash(db, storage, userId) {
     await unifiedDelete(db, storage, null, null, userId, fileIds, folderIds);
     return { success: true };
 }
-
-// =================================================================================
-// 9. 分享与加密
-// =================================================================================
 
 export async function createShareLink(db, itemId, itemType, expiresIn, userId, password = null, customExpiresAt = null) {
     const tokenArray = new Uint8Array(8); crypto.getRandomValues(tokenArray);
@@ -848,10 +859,6 @@ export async function renameFolder(db, storage, folderId, newFolderName, userId)
     return { success: true };
 }
 
-// =================================================================================
-// 10. 認證與其他
-// =================================================================================
-
 export async function createAuthToken(db, userId, token, expiresAt) {
     await db.run(`INSERT INTO auth_tokens (user_id, token, expires_at) VALUES (?, ?, ?)`, [userId, token, expiresAt]);
 }
@@ -877,7 +884,7 @@ export async function scanStorageAndImport(db, storage, userId, storageType, log
         for (const remote of remoteFiles) {
             const existing = await db.get("SELECT 1 FROM files WHERE file_id = ? AND user_id = ? AND deleted_at IS NULL", [remote.fileId, userId]);
             if (existing) { skipCount++; continue; }
-            const fileName = path.basename(remote.fileId);
+            const fileName = getBasename(remote.fileId);
             if (!fileName || fileName.startsWith('.')) continue;
             const uniqueName = await getUniqueName(db, rootFolder.id, fileName, userId, 'file');
             const messageId = (BigInt(Date.now()) * 1000n + BigInt(Math.floor(Math.random() * 1000))).toString();
