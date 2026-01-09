@@ -629,6 +629,7 @@ export async function moveItems(db, storage, fileIds = [], folderIds = [], targe
 // [修复] 还原逻辑辅助函数 (定义顺序调整)
 // =================================================================================
 
+// 先定义级联还原
 async function cascadeRestore(db, folderId, userId) {
     await db.run(`UPDATE files SET is_deleted = 0, deleted_at = NULL WHERE folder_id = ? AND user_id = ?`, [folderId, userId]);
     const subs = await db.all(`SELECT id FROM folders WHERE parent_id = ? AND user_id = ?`, [folderId, userId]);
@@ -638,7 +639,7 @@ async function cascadeRestore(db, folderId, userId) {
     }
 }
 
-// 递归还原并合并 (Restore & Merge Helper)
+// 再定义调用了 cascadeRestore 的还原合并函数
 async function restoreAndMergeFolder(db, sourceId, targetId, userId, conflictMode) {
     const files = await db.all(`SELECT ${SAFE_SELECT_MESSAGE_ID}, fileName FROM files WHERE folder_id = ? AND user_id = ?`, [sourceId, userId]); 
     
@@ -683,6 +684,7 @@ async function restoreAndMergeFolder(db, sourceId, targetId, userId, conflictMod
     }
 }
 
+// 最后定义主入口
 export async function restoreItems(db, storage, fileIds = [], folderIds = [], userId, conflictMode = 'rename') {
     for (const id of (folderIds || [])) {
         const folder = await db.get("SELECT id, name, parent_id FROM folders WHERE id = ? AND user_id = ?", [id, userId]);
