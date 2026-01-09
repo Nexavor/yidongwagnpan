@@ -625,6 +625,19 @@ export async function moveItems(db, storage, fileIds = [], folderIds = [], targe
     return { success: true };
 }
 
+// =================================================================================
+// [修复] 还原逻辑辅助函数 (定义顺序调整)
+// =================================================================================
+
+async function cascadeRestore(db, folderId, userId) {
+    await db.run(`UPDATE files SET is_deleted = 0, deleted_at = NULL WHERE folder_id = ? AND user_id = ?`, [folderId, userId]);
+    const subs = await db.all(`SELECT id FROM folders WHERE parent_id = ? AND user_id = ?`, [folderId, userId]);
+    for(const sub of subs) {
+        await db.run(`UPDATE folders SET is_deleted = 0, deleted_at = NULL WHERE id = ? AND user_id = ?`, [sub.id, userId]);
+        await cascadeRestore(db, sub.id, userId);
+    }
+}
+
 // 递归还原并合并 (Restore & Merge Helper)
 async function restoreAndMergeFolder(db, sourceId, targetId, userId, conflictMode) {
     const files = await db.all(`SELECT ${SAFE_SELECT_MESSAGE_ID}, fileName FROM files WHERE folder_id = ? AND user_id = ?`, [sourceId, userId]); 
@@ -667,15 +680,6 @@ async function restoreAndMergeFolder(db, sourceId, targetId, userId, conflictMod
              await db.run(`UPDATE folders SET is_deleted = 0, deleted_at = NULL, parent_id = ? WHERE id = ? AND user_id = ?`, [targetId, folder.id, userId]);
              await cascadeRestore(db, folder.id, userId);
         }
-    }
-}
-
-async function cascadeRestore(db, folderId, userId) {
-    await db.run(`UPDATE files SET is_deleted = 0, deleted_at = NULL WHERE folder_id = ? AND user_id = ?`, [folderId, userId]);
-    const subs = await db.all(`SELECT id FROM folders WHERE parent_id = ? AND user_id = ?`, [folderId, userId]);
-    for(const sub of subs) {
-        await db.run(`UPDATE folders SET is_deleted = 0, deleted_at = NULL WHERE id = ? AND user_id = ?`, [sub.id, userId]);
-        await cascadeRestore(db, sub.id, userId);
     }
 }
 
