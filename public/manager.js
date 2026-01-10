@@ -1,4 +1,4 @@
-// public/manager.js - 修复移动无响应及合并递归问题
+// public/manager.js - 修复移动无响应及合并递归问题，修复右键菜单定位问题
 
 // =================================================================================
 // 1. 全局工具函数 (无依赖，放在最外层)
@@ -287,9 +287,16 @@ document.addEventListener('DOMContentLoaded', () => {
         if(!contextMenu) return;
         const menuWidth = 200; 
         const menuHeight = isTrashMode ? 80 : 350; 
+        
+        // 修正坐标防止溢出窗口
         if (x + menuWidth > window.innerWidth) x = window.innerWidth - menuWidth - 10;
         if (y + menuHeight > window.innerHeight) y = window.innerHeight - menuHeight - 10;
         
+        // 【关键修改】强制使用 fixed 定位，确保菜单相对于视口定位
+        // 这样可以解决页面滚动后，菜单出现在顶部（文档流位置）导致不可见的问题
+        contextMenu.style.position = 'fixed';
+        contextMenu.style.zIndex = '10000'; // 确保在最上层
+
         contextMenu.style.top = `${y}px`;
         contextMenu.style.left = `${x}px`;
         contextMenu.style.display = 'flex';
@@ -1816,4 +1823,3 @@ document.addEventListener('DOMContentLoaded', () => {
     loadFolder(currentFolderId);
     updateQuota();
 });
-
